@@ -18,6 +18,12 @@ Set GREENDREAM_INPUT_TOKEN to the runner's operator token: a `spec` event change
 building shows, so the runner requires the token for it. Blocked or rejected rows never leave
 here - the queue filters them, and this checks again, because a filter on one side of an HTTP
 call is not a guarantee on the other.
+
+This needs both halves' tokens, one for each end, and it is the one process most likely to be
+run from a cron wrapper or a unit file - which is exactly where a token on a command line ends
+up visible in `ps` to every user on the machine for a week. So prefer the files:
+GREENDREAM_INPUT_TOKEN_FILE and GD_INGEST_TOKEN_FILE (or --input-token-file / --api-token-file).
+The old flags and variables still work.
 """
 
 from __future__ import annotations
@@ -31,6 +37,26 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 UA = "greendream-llm-push/0.2"
+
+
+def resolve_token(value: str, path: str, env_name: str) -> str:
+    """One token from, in order: the flag, ``$ENV_NAME``, the file flag, ``$ENV_NAME_FILE``.
+
+    The flags come first so nothing that works today stops working; the files are the ones to
+    use, because a flag is in ``ps``. A file named but unreadable is reported rather than
+    treated as "no token", since the failure it would otherwise cause is a 401 in the middle
+    of the night with no explanation.
+    """
+    if value.strip():
+        return value.strip()
+    for candidate in (path.strip(), os.environ.get(f"{env_name}_FILE", "").strip()):
+        if not candidate:
+            continue
+        try:
+            return open(candidate, "r", encoding="utf-8").read().strip()
+        except OSError as e:
+            print(f"[push] cannot read token file {candidate}: {e}", flush=True)
+    return ""
 
 
 def get_json(url: str, timeout: float = 6.0, token: Optional[str] = None) -> Dict[str, Any]:
@@ -135,15 +161,22 @@ def main() -> None:
     ap.add_argument("--approved-only", action="store_true",
                     help="skip rows no operator has approved yet")
     ap.add_argument("--input-token", default=os.environ.get("GREENDREAM_INPUT_TOKEN", ""),
-                    help="the runner's operator token (a spec event needs it)")
+                    help="the runner's operator token (a spec event needs it); in ps, so prefer the file")
     ap.add_argument("--api-token", default=os.environ.get("GD_INGEST_TOKEN", ""),
-                    help="this service's token, if it is set")
+                    help="this service's token, if it is set; in ps, so prefer the file")
+    ap.add_argument("--input-token-file", default="", metavar="PATH",
+                    help="read the runner's token from this file (or $GREENDREAM_INPUT_TOKEN_FILE)")
+    ap.add_argument("--api-token-file", default="", metavar="PATH",
+                    help="read this service's token from this file (or $GD_INGEST_TOKEN_FILE)")
     args = ap.parse_args()
+
+    input_token = resolve_token(args.input_token, args.input_token_file, "GREENDREAM_INPUT_TOKEN")
+    api_token = resolve_token(args.api_token, args.api_token_file, "GD_INGEST_TOKEN")
 
     cursor = args.since
     while True:
         cursor, ok = drain(args.api, args.target, cursor,
-                           api_token=args.api_token or None, input_token=args.input_token or None,
+                           api_token=api_token or None, input_token=input_token or None,
                            approved_only=args.approved_only)
         if args.once:
             print(f"[push] cursor now {cursor}", flush=True)

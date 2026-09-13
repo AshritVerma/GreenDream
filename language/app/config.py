@@ -10,6 +10,10 @@ Two tokens, both unset by default (which is right on a laptop and wrong behind a
 GD_INGEST_TOKEN guards both writing and previewing, GD_ADMIN_TOKEN guards the switches and
 the review queue.
 
+Every secret here is read with `read_secret`, which prefers the file named by `<NAME>_FILE`,
+because a value on a command line is in `ps` for every user on the machine. `.env` beside
+this package works too and is loaded at import.
+
 `settings` is a process-wide singleton; `settings.refresh()` re-reads the environment
 (the tests use it after monkeypatching os.environ).
 """
@@ -61,6 +65,43 @@ def load_dotenv(path: Optional[Path] = None) -> None:
             os.environ[key] = val
 
 
+def read_secret(name: str, default: str = "") -> str:
+    """A secret from ``$NAME``, or from the file named by ``$NAME_FILE``.
+
+    Anything on a command line is readable by every user on the machine through ``ps``, and
+    ``GD_ADMIN_TOKEN=x uvicorn ...`` only moves it into ``/proc/<pid>/environ``, which needs
+    the same uid but is still inherited by every child process. For a week-long unattended
+    run the token belongs in a file with mode 600, so ``$NAME_FILE`` is the recommended way.
+
+    ``$NAME`` still wins when it is set and non-empty: the file is an addition, not a
+    migration, and nothing that works today stops working. A file that cannot be read says
+    so on stdout rather than silently leaving the route open.
+
+    The runner half has the same function in ``common/webserver.py``; the two halves do not
+    import each other, and ten lines duplicated is cheaper than a shared package.
+    """
+    direct = os.environ.get(name, "").strip()
+    if direct:
+        return direct
+    path = os.environ.get(f"{name}_FILE", "").strip()
+    if not path:
+        return default
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as e:
+        print(f"[config] {name}_FILE is set but unreadable ({path}): {e}", flush=True)
+        return default
+    if not value:
+        print(f"[config] {name}_FILE is empty ({path})", flush=True)
+        return default
+    try:  # POSIX only; on Windows the ACL is not in st_mode and there is nothing to say
+        if os.name == "posix" and os.stat(path).st_mode & 0o077:
+            print(f"[config] {path} is readable by other users — chmod 600 it", flush=True)
+    except OSError:
+        pass
+    return value
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw == "":
@@ -91,8 +132,8 @@ class Settings:
         # Two providers, one contract. "auto" picks whichever key is present, preferring OpenAI,
         # because the judgment this asks for (is there an iconic shape here or not?) is the part
         # worth paying a flagship for.
-        openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        openai_key = read_secret("OPENAI_API_KEY")
+        anthropic_key = read_secret("ANTHROPIC_API_KEY")
         provider = os.environ.get("GD_PROVIDER", "auto").strip().lower()
         if provider not in PROVIDERS:
             provider = "openai" if openai_key or not anthropic_key else "anthropic"
@@ -113,8 +154,8 @@ class Settings:
         self.llm_enabled: bool = _bool("GD_USE_LLM", True)
         gate = os.environ.get("GD_GATE", "auto").strip().lower()
         self.gate: str = gate if gate in GATE_MODES else "auto"
-        self.ingest_token: str = os.environ.get("GD_INGEST_TOKEN", "").strip()
-        self.admin_token: str = os.environ.get("GD_ADMIN_TOKEN", "").strip()
+        self.ingest_token: str = read_secret("GD_INGEST_TOKEN")
+        self.admin_token: str = read_secret("GD_ADMIN_TOKEN")
         self.live_view_url: str = os.environ.get(
             "GD_LIVE_VIEW_URL", "https://sundai.willsarg.com/olive-koala?view=street"
         ).strip()
