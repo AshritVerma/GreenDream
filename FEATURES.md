@@ -257,3 +257,152 @@ Trusted to choose a depiction. Not trusted with anything that reaches the window
 - **Nothing calls the real API yet.** The Claude path is exercised only by a stubbed tool answer
   in the tests. First run with a key: check tier and latency on a handful of queries, and
   confirm the sprite rows come back as exactly 9 characters.
+
+## Backlog, in priority order
+
+Everything below came out of an end-to-end probe on 13 September 2026: roughly 150 queries plus
+every operational path, run over HTTP against a clean instance with rate limits off and a throwaway
+data directory. Nothing here is fixed yet. Each item gives the evidence, the place that would
+change, and what would prove it fixed.
+
+### Settled policy: what the building refuses
+
+Two questions the probe forced, now decided:
+
+- **Self-harm is an ordinary refusal.** "i want to die" gets the same treatment as any other
+  blocklist hit: `spec.shrug()`, the grey shake and `HMM?`. Deliberately *not* a special "care"
+  scene and not a support-message channel — the facade's only vocabulary for "no" is the shrug, and
+  inventing a second kind of refusal would make the building look like it is diagnosing people.
+- **No campaigning and no advertising.** "free palestine", "trump 2028", "buy bitcoin now" are all
+  refusals, same shrug. The building is not a billboard and not a placard.
+
+If a human support message is ever wanted, the frontend is the place for it: it already knows a
+refusal happened, and it is the only surface that can say something longer than seven characters.
+
+### 1. Safety and the trust boundary
+
+The moderation gaps, with the two decisions above now defining the target:
+
+| query | today | should be |
+|---|---|---|
+| `i want to die` | lexicon `neutral`, word `OK` | blocked shrug |
+| `free palestine`, `trump 2028`, `buy bitcoin now` | lexicon `neutral` | blocked shrug |
+| `john smith is a loser`, `sarah call me` | lexicon `neutral` | blocked (private person) |
+| `kill the ref`, `the killer bees` | blocked | allowed; both are innocent |
+| `555 123 4567`, `bob@example.com` | stored verbatim in the day's JSONL | scrubbed before the log |
+
+The false positives and the misses have the same root cause: `is_blocked` matches substrings, so
+"kill" fires inside "killer bees" while a whole category like self-harm has no entry at all. The
+private-person rule exists only in the model's system prompt, which means it disappears in exactly
+the situation the local tier is for — the vendor being down. **Where:** `app/fallback.py::BLOCKLIST`
+and `is_blocked`; PII scrubbing sits between `local_result` and `store.append`. **Check:** the
+five-row table above passes, and no digit run of seven or more survives into a stored `query`.
+
+Separately, and worse, raw user text escapes the trust boundary. `app/main.py:250` returns
+`scenes=[s.query for s in live]`, so `GET /api/arc` hands back the untouched query; the probe got
+`<script>alert(1)</script>`, `<img src=x>`, `555 123 4567` and `i want to die` back out of it. The
+demo page then interpolates that into `innerHTML` at `app/demo.py:463` with no escaping. The scene
+card is careful with its own copy of the query (`app/demo.py:398` escapes `<`), so the arc path is
+an inconsistency rather than a policy: one route escapes, the other does not. Note also that
+`title` and `notes` are model-controlled free text rendered the same way, so they become injectable
+the moment the model tier is switched on. **Where:** `app/main.py::arc` (return validated titles,
+not queries) and every interpolation in `app/demo.py::refreshArc` / `render`. **Check:** submit
+`<img src=x onerror=...>` and then `GET /api/arc` — the response carries no user-supplied text, and
+`#arcout` gains no element node from it.
+
+### 2. Rewrite the matcher lookup — seven bugs, one fix
+
+`lookup()` matches substrings, in the wrong order, against an index missing half of what it should
+contain. Every row here is the same rewrite:
+
+| query | today | the bug |
+|---|---|---|
+| `sunset` | the *sunrise* scene, 0% coverage, 0.35 | "sun" matches inside "sunset"; also semantically backwards |
+| `supercalifragilisticexpialidocious` | the *up* scene | "up" matches at index 1 |
+| `snö` | *sunrise* at **0.9** | normalises to "sn", which difflib matches to "sun" |
+| `happy birthday` | *joy*, not the birthday scene | the word pass runs before the phrase pass, so "happy" wins |
+| `its my birthday` | `neutral`, with "birthday" reported unused | library *keys* are not in the per-word index |
+| `the crowd goes wild` | `neutral` | library *keywords* are not in the index either |
+| `thundrstorm`, `snowww` | right scene, punished to 0.35 | coverage counts literal tokens, so a typo reads as unused |
+| `basket ball` | *a dunk* at **0.9** | a fuzzy hit has no confidence ceiling |
+
+**Where:** `app/fallback.py::lookup`, `understood_by`, and the coverage arithmetic in
+`local_result`. **Check:** word-boundary matching only; the phrase pass first with the longest match
+winning; keys and keywords in the index; fuzzy refused below three characters and capped around 0.6
+however good the coverage looks; and `thundrstorm` scoring like the word it obviously meant.
+
+### 3. Negation in the affect lexicon
+
+`i'm not sad` returns the sad scene with the word `AWW`. `not happy at all` returns the joy scene.
+Nothing reads "not", "never" or "no" — they are just unmatched tokens, so the sentiment lands
+exactly backwards. **Where:** `app/fallback.py::lexicon_affect` (and the alias pass, since "not
+happy" currently reaches a library scene). **Check:** `i'm not sad` and `not happy at all` both come
+back with valence on the other side of zero from their un-negated forms.
+
+### 4. Library breadth
+
+Of 59 realistic queries, **36 (61%) came back as `neutral` with the word `OK`**, and **48 (81%)
+scored recognizability at or below 0.35**. Thirteen reached the warm library. Twelve scenes are
+carrying a whole city.
+
+The misses are not exotic — they are the first things anyone would type:
+
+- **Local sport and place:** `go sox`, `celtics in 7`, `bruins goal`, `beat harvard`, `the green
+  line`, `the T is late`, `charles river`
+- **Holidays and milestones:** `merry christmas`, `eid mubarak`, `graduation day`, `i got the job`,
+  `she said yes`, `welcome home`, `good luck tomorrow`
+- **Common objects and sky:** `fireworks`, `full moon`, `a rainbow`, `a red balloon`, `a cat`,
+  `a tree`, `an umbrella`, `the northern lights`
+- **Open invitations:** `surprise me`, `anything`, `show me something`
+
+`OK` also needs to stop being the default text. "The building shrugs politely" is currently the
+single most common thing it says, and `OK` on nine windows is the least interesting two letters
+available. **Where:** `app/fallback.py::LIBRARY`, `ALIASES`, `BEATS`, and `EMOTION_WORD`.
+**Check:** rerun the same 59 queries and have fewer than 20% land on `neutral`, with no scene
+answering more than about a fifth of them.
+
+### 5. The queue contract
+
+Two loose ends where the pixel side would get this wrong through no fault of its own. Blocked
+submissions are stored and served by `GET /api/queue` with `ok: false` and the refused text kept
+verbatim, and nothing in the contract says a consumer must filter them — the probe's day log held
+four such rows. Relatedly, `app/main.py:251` composes the arc over the *unfiltered* list, so
+shrugs colour the night even though `count` and `scenes` filter on `ok`. And `review: "pending"` is
+write-only: every row the probe produced carried it, and there is no endpoint that can move a row
+to approved, so a careful consumer would correctly draw nothing at all. **Where:**
+`app/main.py::queue` and `::arc`, plus whatever approves a row. **Check:** `/api/queue` either
+omits `ok: false` rows or documents the filter, the arc is composed only over `live`, and one call
+can approve a pending row.
+
+### 6. Operational polish
+
+- **Preview limits are hardcoded and undiscoverable.** `PREVIEW_SECONDS = 2.0` and
+  `PREVIEW_PER_HOUR = 120` are module constants in `app/main.py`; four rapid previews all returned
+  429 on an instance with rate limits explicitly turned off. Type-ahead preview cannot work against
+  that, and `/api/state` publishes `max_words` and `max_chars` but no rate limits, so a frontend
+  cannot even pace itself. **Check:** both limits configurable, and a frontend can read them.
+- **`/api/library` over-promises.** It advertises twelve scenes including `birthday` and
+  `my heart is racing`, several of which the matcher cannot reach through natural phrasing (see
+  item 2). **Check:** every advertised key is reachable by at least one sentence a person would say.
+- **Some scenes open too dark to read as alive.** `sunrise` sits at brightness 0.15 for its first
+  **4.8 seconds**; `thunderstorm` opens at 0.35 for 4.2 s and `take me to space` at 0.35 for 3.6 s
+  (its title is `hyperspace`, which is what the probe logged). Earning the bright
+  moment is right, but from the street a near-black tower reads as broken, and it is the first thing
+  a passer-by sees. **Where:** `app/fallback.py::BEATS`, possibly a floor in `spec.validate()`.
+  **Check:** no scene spends more than about two seconds below 0.3, and no first beat opens there.
+
+### What the probe confirmed working
+
+The operational half held up without qualification. The gate, the kill switch, admin auth (401 on a
+bad token) and the 423 payload with its `live_view_url` all behave as documented, and `/api/arc` and
+`/api/queue` stay readable while intake is shut. Drafts are fully deterministic: `a thunderstorm`
+and `A THUNDERSTORM!!!` produce byte-identical specs. Preview and submission are properly separated
+— previews never reach the log, the queue or the arc, the `preview:` / `submit:` cache namespacing
+holds, and a blocklist hit is refused identically on both endpoints. Validation is clean: a sixth
+word is a `422` with a usable message, empty input is rejected, and `<script>`, SQL fragments, emoji
+and CJK cannot reach the facade because `word` is clamped to A-Z, `!` and `?`.
+
+One caveat over all of the quality findings: there is no API key on this machine, so every result
+came from the local tier. Items 2, 3 and 4 are fallback-quality problems that the model tier would
+largely mask. Items 1 and 5 are not masked at all — moderation runs *before* any model call, and
+the raw-text leak is in the arc and the demo page, where no model is involved.
