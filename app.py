@@ -9,6 +9,10 @@ Phases (from real sunrise/sunset for MIT, or an accelerated clock for demos):
          composer) and played in cycles — descent, dream, surfacing, deep sleep — each cycle a
          new dream; late prompts are absorbed as sleep-talk and woven into the next dream
 Everything is logged to a journal (prompts + dream scripts) served at /journal.
+
+Across all four phases sits FREEZE, the operator's kill switch: one flag that replaces the
+whole render with a standby field on the next frame, whatever the building was doing. See
+``_render_frozen`` and ``_set_freeze``.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from common.inputs import Timeline
 from sensors.weather import WeatherSensor
 
 from dream import DreamPlayer, compose_async
+from freeze import FREEZE_FILE, FreezeWatcher, install_signal_toggle
 from genie import clip_words, request_async
 from pages import JOURNAL_PAGE, SAY_PAGE
 from scene import Performance, validate
@@ -37,6 +42,15 @@ from worlds import mix
 HOLD = 5.0
 QUEUE_MAX = 5
 ONSITE = ("pedestal", "onsite", "qr", "plaza", "speech")   # channels whose prompts perform live by default
+
+# Standby, the frozen facade. Amber because it is nobody's scene palette and it is the
+# colour every other held machine in the world uses; dim because calm; flat because a
+# 153-window grid is never uniform by accident. Numbers in _render_frozen's docstring.
+FREEZE_RGB = (1.0, 0.58, 0.16)
+FREEZE_LEVEL = 0.10        # the floor of the swell
+FREEZE_SWELL = 0.05        # ...and how far above it the breath goes
+FREEZE_BREATH_S = 9.0      # slower than the night's 8 s breath, so the two do not read alike
+THAW_S = 1.2               # coming back is a fade; going in is not (see _set_freeze)
 
 
 def _hour_of(iso: str, default: float) -> float:
@@ -67,6 +81,9 @@ class GreenDream(App):
         parser.add_argument("--time-scale", type=float, default=1.0, help="clock speed (720 = a day in 2 minutes)")
         parser.add_argument("--start-hour", type=float, default=None, help="start the clock at this hour")
         parser.add_argument("--journal", default="journal", help="folder for the day log and dream scripts")
+        parser.add_argument("--freeze-file", default=None, metavar="PATH",
+                            help="sentinel file for the kill switch: create it to freeze the facade, delete it to resume "
+                                 "(default FREEZE, or $GREENDREAM_FREEZE_FILE; empty string disables)")
 
     # ------------------------------------------------------------------ setup
     def setup(self, ctx: Context) -> None:
@@ -108,11 +125,23 @@ class GreenDream(App):
         self.dream_material: list = []        # the snapshot of self.day the current script indexes into
         self.mumble: tuple | None = None      # (t, accent) sleep-talk acknowledgement
         self.marquee: Marquee | None = None
+        # freeze — orthogonal to all of the above, and deliberately not part of the phase machine
+        self.frozen = False
+        self.freeze_t0 = 0.0
+        self.thaw_t0 = -1e6
+        self.freeze_source = "-"
         self.journal_dir = getattr(ctx.args, "journal", "journal")
         os.makedirs(self.journal_dir, exist_ok=True)
         self.last_tier = "-"
         self.sensor = WeatherSensor(ctx.bus, offline=self.offline)
         self.sensor.start()
+        fpath = getattr(ctx.args, "freeze_file", None)
+        self.watcher = FreezeWatcher(ctx.bus, path=FREEZE_FILE if fpath is None else fpath)
+        self.watcher.start()
+        sig = install_signal_toggle()
+        if self.watcher.path:
+            print(f"[freeze] kill switch: touch {self.watcher.path}"
+                  f"{f', or kill -{sig} {os.getpid()}' if sig else ''}", flush=True)
         # pages
         ctx.add_page("/say", SAY_PAGE)
         ctx.add_page("/journal", JOURNAL_PAGE)
@@ -120,6 +149,9 @@ class GreenDream(App):
             ctx.server.add_json("/api/journal", lambda m, b: self.journal_json())
         url = (ctx.server.lan_url + "/say") if ctx.server else "/say"
         ctx.set_controls([
+            # First in the panel on purpose: the one control you reach for when something is
+            # wrong on the facade in front of people. It takes effect on the next frame.
+            {"type": "toggle", "label": "FREEZE — hold the facade", "value": False, "event": {"type": "freeze"}, "key": "on"},
             {"type": "note", "text": "Type anything (or open /say on a phone). Phase follows real sunrise/sunset; override it below for demos."},
             {"type": "speech", "label": "Say it"},
             {"type": "link", "label": "Phone input page", "href": "/say", "text": url},
@@ -158,7 +190,13 @@ class GreenDream(App):
                      "latency_ms": int(ev.get("latency_ms") or 0), "ts": time.time()}
             self.day.append(entry)
             self._journal_append(entry)
-            if self.phase in ("DAY", "DAWN") and priority == "live":
+            if self.frozen:
+                # Written down, never performed. The words are the material of the piece and
+                # one JSONL line keeps them, so this still reaches tonight's dream; what is
+                # deliberately dropped is the performance debt, because unfreezing into a
+                # backlog is the opposite of what the operator pressed the switch for.
+                pass
+            elif self.phase in ("DAY", "DAWN") and priority == "live":
                 self.queue.append(spec)
             else:  # asleep, or dream material only: acknowledge faintly, weave into the next dream
                 self.mumble = (ctx.t, spec["palette"]["accent"])
@@ -181,6 +219,66 @@ class GreenDream(App):
                 self.current.done = True
             if self.dream and self.dream.cur:
                 self.dream.cur.done = True
+        elif t == "freeze":
+            on = (not self.frozen) if ev.get("toggle") else bool(ev.get("on", True))
+            self._set_freeze(on, ctx.t, str(ev.get("source", "web"))[:32])
+            if ctx.server:
+                ctx.server.frozen = self.frozen   # so /healthz answers honestly straight away
+
+    # ----------------------------------------------------------------- freeze
+    def _set_freeze(self, on: bool, t: float, source: str = "web") -> None:
+        """Hold the facade, or let it go. Idempotent, and safe from any phase.
+
+        Freezing drops everything in flight rather than pausing it. Two reasons: whatever was
+        on the windows when the switch went is by hypothesis the thing that was wrong, so
+        resuming it would put the problem straight back up; and a paused `Performance` or
+        `DreamPlayer` would come back mid-gesture, which reads as a glitch rather than as a
+        decision. The phase machine underneath is untouched — it keeps its clock, keeps
+        entering phases, and whatever it has arrived at is what the building resumes into.
+        """
+        if on == self.frozen:
+            return
+        self.frozen = on
+        self.freeze_source = source
+        if on:
+            self.freeze_t0 = t
+            self.queue.clear()
+            self.current = None
+            self.daydream = None
+            self.prev_canvas = None
+            self.trans_t0 = -1e6
+            self.marquee = None
+            self.mumble = None
+            self.dream = None
+        else:
+            self.thaw_t0 = t
+            # Start the night clean: descent will use a script that arrived during the freeze
+            # if one did, and otherwise ask for a fresh one.
+            self.dream_stage, self.stage_t0 = "descent", t
+        print(f"[freeze] {'ON — facade held' if on else 'off — resuming'} (via {source})", flush=True)
+
+    def _render_frozen(self, t: float) -> Canvas:
+        """Standby: all 153 windows at one identical dim amber level, swelling very slowly.
+
+        Not black. A dark tower reads as a fault, and a fault on this building in front of an
+        audience is the failure mode the switch exists to avoid — the point is to say "somebody
+        is in charge of this", not "it broke". Not a scene either: every window the same value
+        is something no world, particle field or sprite ever produces, so flatness is the most
+        legible statement a facade can make that it is being held on purpose. At 300 m the read
+        is an evenly lit amber tower, which is exactly what a held machine looks like.
+
+        The swell (0.10 → 0.15 of full amber over 9 s) is the one moving part, and it is there
+        so the field cannot be mistaken for a frozen frame or a dead sender. 9 s rather than the
+        night's 8 s, and warm rather than the night's indigo, so an operator on the plaza can
+        tell standby from deep sleep at a glance. Mean brightness lands near 0.09 — the same
+        band as the building's own resting states, which is what makes it read as calm rather
+        than as a signal — and it moves by ~0.0004 per frame, two orders of magnitude inside
+        --gentle's limiter.
+        """
+        cv = Canvas()
+        b = 0.5 + 0.5 * math.sin((t - self.freeze_t0) * 2 * math.pi / FREEZE_BREATH_S)
+        cv.px[:] = np.array(FREEZE_RGB, dtype=np.float32) * (FREEZE_LEVEL + FREEZE_SWELL * b)
+        return cv
 
     # ---------------------------------------------------------------- journal
     def _journal_append(self, entry: dict) -> None:
@@ -227,6 +325,17 @@ class GreenDream(App):
         if phase != self.phase:
             self._enter(phase, t)
         self.energy = max(0.0, self.energy - dt / 40.0)
+        if self.frozen:
+            # The one early return in the frame loop. The clock and the phase machine above
+            # have already run, so the building knows what time it is and which phase it is
+            # in; it is simply not showing it. A marquee queued by an _enter() that fired
+            # during the freeze is dropped rather than saved up for the thaw.
+            self.marquee = None
+            cv.px[:] = self._render_frozen(t).px
+            cv.clip()
+            if ctx.frame_index % 6 == 0:
+                self._publish(ctx, "FROZEN")
+            return
         if phase == "DAY":
             out = self._render_day(t, dt)
         elif phase == "DAWN":
@@ -243,12 +352,23 @@ class GreenDream(App):
             self.marquee.draw(out, 0.9)
             if self.marquee.done:
                 self.marquee = None
+        k = (t - self.thaw_t0) / THAW_S
+        if k < 1.0:   # coming out of a freeze: fade up from standby into whatever is running now
+            out.px = out.px * max(0.0, k) + self._render_frozen(t).px * (1.0 - max(0.0, k))
         cv.px[:] = out.px
         cv.clip()
         if ctx.frame_index % 6 == 0:
-            ctx.set_status(phase=self.phase + (f" · {self.dream_stage}" if self.phase == "NIGHT" else ""), clock=f"{int(self.hour):02d}:{int((self.hour % 1) * 60):02d}",
-                           prompts_today=len(self.day), now=(self.dream.current["note"][:40] if (self.dream and self.dream.current) else (self.current.spec["title"] if self.current else "idle")),
-                           dreams=len(self.dreams_tonight), thinking=self.pending, energy=round(self.energy, 2), last=self.last_tier)
+            self._publish(ctx)
+
+    def _publish(self, ctx: Context, phase_override: str = "") -> None:
+        """The status panel and /healthz. Called from both the frozen and the live path."""
+        if ctx.server:
+            ctx.server.frozen = self.frozen
+        ctx.set_status(phase=phase_override or (self.phase + (f" · {self.dream_stage}" if self.phase == "NIGHT" else "")),
+                       clock=f"{int(self.hour):02d}:{int((self.hour % 1) * 60):02d}",
+                       prompts_today=len(self.day),
+                       now=("held (%s)" % self.freeze_source) if self.frozen else (self.dream.current["note"][:40] if (self.dream and self.dream.current) else (self.current.spec["title"] if self.current else "idle")),
+                       dreams=len(self.dreams_tonight), thinking=self.pending, energy=round(self.energy, 2), last=self.last_tier)
 
     def _enter(self, phase: str, t: float) -> None:
         self.phase, self.phase_t0 = phase, t
@@ -403,6 +523,10 @@ class GreenDream(App):
             k = 0.25 * math.sin(clamp((t - self.mumble[0]) / 3.0) * math.pi)
             cv.blob(9.0, 4.0, 2.5, hex_rgb(self.mumble[1]), k, "add")
         return cv
+
+    # --------------------------------------------------------------- teardown
+    def teardown(self, ctx: Context) -> None:
+        self.watcher.stop()
 
     # ------------------------------------------------------------------- demo
     def demo_script(self):
