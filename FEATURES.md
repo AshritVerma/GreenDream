@@ -1,7 +1,9 @@
 # Features
 
-What this service does today, what each switch does, and what is deliberately left open.
-It is independent of the GreenDream repo: nothing here imports it, and nothing here edits it.
+What the language half does today, what each switch does, and what is deliberately left open.
+This is the canonical feature list. The service that implements it lives in the sibling
+`greendream-llm` folder; GreenDream does not import it, and that service does not edit GreenDream.
+Paths in the table below are relative to `greendream-llm`.
 
 ## What it does
 
@@ -10,28 +12,29 @@ Someone types up to five words. This service reads them as **one thing to show**
 renders nothing; the pixel side comes later. A day of those scenes becomes one **arc** at
 `GET /api/arc`, which is the seed for that night's dream.
 
-| Feature | State | Where |
-|---|---|---|
-| One query of up to 5 words, 6 words rejected | done | `app/models.py::IngestRequest` |
-| Honest match reporting: `match`, `unused_words`, `coverage` | done | `app/fallback.py::local_result` |
-| `beats`: a scene is an event in time, not a held picture | done | `app/spec.py::_beats`, `app/fallback.py::BEATS` |
-| Two providers behind one call, two price tiers | done | `app/llm.py::call_model` |
-| Cheap preview vs paid submission | done | `POST /api/preview` |
-| The sprite / no-sprite decision belongs to the model | done | `app/llm.py::SYSTEM` |
-| Model tier: one forced tool call, cached system prompt | done, never run against the real API | `app/llm.py` |
-| Local tier: warm library of 12 scenes, then an affect lexicon | done, fully offline | `app/fallback.py` |
-| Spec draft validated and clamped on every path | done | `app/spec.py::validate` |
-| Day-level arc (quiet open, loud middle, quiet close) | done | `app/fallback.py::compose_arc`, `GET /api/arc` |
-| Sunset gate with a "the building is dreaming" 423 | done | `app/sun.py`, `app/gate.py` |
-| Manual kill switch and LLM off switch at runtime | done | `POST /api/admin/switch` |
-| Blocklist moderation, before any API call | done | `app/fallback.py::BLOCKLIST` |
-| Per-IP rate limit (gap + hourly cap) | done | `app/ratelimit.py` |
-| JSONL audit log, one file per day | done | `app/store.py` |
-| Queue endpoint with a cursor for the pixel side | done | `GET /api/queue?since=` |
-| Identical queries served from a disk cache | done | `app/store.py::cache_get` |
-| Frontend state endpoint (phase, accepting, live view) | done | `GET /api/state` |
-| Bench page: one query box, word counter, the draft, the arc | done | `GET /demo` |
-| Push script into a running GreenDream | written, not wired | `tools/push_to_greendream.py` |
+| Feature | Where |
+|---|---|
+| One query of up to 5 words, 6 words rejected | `app/models.py::IngestRequest` |
+| Honest match reporting: `match`, `unused_words`, `coverage` | `app/fallback.py::local_result` |
+| `beats`: a scene is an event in time, not a held picture | `app/spec.py::_beats`, `app/fallback.py::BEATS` |
+| Two providers behind one call, two price tiers | `app/llm.py::call_model` |
+| Cheap preview vs paid submission | `POST /api/preview` |
+| The sprite / no-sprite decision belongs to the model | `app/llm.py::SYSTEM` |
+| Model tier: one forced tool call, cached system prompt (never run against the real API) | `app/llm.py` |
+| Local tier: warm library of 12 scenes, then an affect lexicon (fully offline) | `app/fallback.py` |
+| Spec draft validated and clamped on every path | `app/spec.py::validate` |
+| Day-level arc (quiet open, loud middle, quiet close) | `app/fallback.py::compose_arc`, `GET /api/arc` |
+| Sunset gate with a "the building is dreaming" 423 | `app/sun.py`, `app/gate.py` |
+| Manual kill switch and LLM off switch at runtime | `POST /api/admin/switch` |
+| Blocklist moderation, before any API call | `app/fallback.py::BLOCKLIST` |
+| Per-IP rate limit (gap + hourly cap) | `app/ratelimit.py` |
+| JSONL audit log, one file per day | `app/store.py` |
+| Queue endpoint with a cursor for the pixel side | `GET /api/queue?since=` |
+| Identical queries served from a disk cache | `app/store.py::cache_get` |
+| Frontend state endpoint (phase, accepting, live view) | `GET /api/state` |
+| Bench page: one query box, word counter, the draft, the arc | `GET /demo` |
+| `gpt-6-astra` wire (written, never run live) | `app/llm.py::_openai` |
+| Push script into a running GreenDream (written, not wired) | `tools/push_to_greendream.py` |
 
 ## Nothing you type is silently dropped
 
