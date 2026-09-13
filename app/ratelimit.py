@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
-from typing import Deque, Dict, Tuple
+from typing import Deque, Dict, Optional, Tuple
 
 from .config import settings
 
@@ -19,11 +19,16 @@ _hits: Dict[str, Deque[float]] = {}
 HOUR = 3600.0
 
 
-def check(client: str, now: float = 0.0) -> Tuple[bool, int]:
-    """(allowed, retry_after_seconds). Records the hit when allowed."""
+def check(client: str, now: float = 0.0, seconds: Optional[float] = None,
+          per_hour: Optional[int] = None) -> Tuple[bool, int]:
+    """(allowed, retry_after_seconds). Records the hit when allowed.
+
+    `seconds` and `per_hour` override the configured limits, so a cheap preview can be allowed to
+    run far more often than a submission that costs real money and a slot on the building.
+    """
     now = now or time.time()
-    gap = settings.rate_seconds
-    cap = settings.rate_per_hour
+    gap = settings.rate_seconds if seconds is None else seconds
+    cap = settings.rate_per_hour if per_hour is None else per_hour
     if gap <= 0 and cap <= 0:
         return True, 0
 

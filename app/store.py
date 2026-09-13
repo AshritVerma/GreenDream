@@ -98,9 +98,12 @@ def _load_cache() -> Dict[str, Any]:
         return {}
 
 
-def cache_key(query: str) -> str:
-    """Punctuation- and case-insensitive, so "a Rocket Launch!" hits "a rocket launch"."""
-    return normalize(query)
+def cache_key(query: str, tier: str = "submit") -> str:
+    """Punctuation- and case-insensitive, so "a Rocket Launch!" hits "a rocket launch".
+
+    The tier is part of the key so a cheap preview can never be served later as the real answer.
+    """
+    return f"{tier}:{normalize(query)}"
 
 
 def cache_get(key: str) -> Optional[Dict[str, Any]]:

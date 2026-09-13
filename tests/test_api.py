@@ -369,7 +369,7 @@ def test_anthropic_stays_available_as_the_other_provider(monkeypatch):
     monkeypatch.delenv("GD_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
     settings.refresh()
-    assert (settings.provider, settings.model) == ("anthropic", "claude-haiku-4-5")
+    assert (settings.provider, settings.model) == ("anthropic", "claude-sonnet-5")
     monkeypatch.setattr(settings, "offline", False)
 
     seen = {}
@@ -382,6 +382,63 @@ def test_anthropic_stays_available_as_the_other_provider(monkeypatch):
     settings.set_llm(True)
     assert llm.call_model("the green line")["spec"]["title"] == "green line"
     assert seen["url"] == llm.ANTHROPIC_URL and seen["headers"]["x-api-key"] == "test-key"
+
+
+def test_the_two_tiers_are_different_brains(monkeypatch):
+    monkeypatch.setenv("GD_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    for stale in ("GD_MODEL", "ANTHROPIC_MODEL", "GD_PREVIEW_MODEL", "GD_REASONING_EFFORT", "GD_PREVIEW_EFFORT"):
+        monkeypatch.delenv(stale, raising=False)
+    settings.refresh()
+
+    submit, preview = settings.tier("submit"), settings.tier("preview")
+    assert (submit.model, submit.effort) == ("claude-sonnet-5", "high")
+    assert (preview.model, preview.effort) == ("claude-haiku-4-5", "low"), "cheapest for a guess"
+    assert submit.api_key == preview.api_key == "test-key", "one key, two models"
+    assert settings.timeout("preview") < settings.timeout("submit"), "nobody waits for a guess"
+
+
+def test_preview_uses_the_cheap_model_and_is_not_logged(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "api_key", "test-key")
+    monkeypatch.setattr(settings, "offline", False)
+    monkeypatch.setattr(settings, "preview_model", "cheap-model")
+    monkeypatch.setattr(settings, "model", "dear-model")
+    settings.set_llm(True)
+    seen = []
+
+    def fake(query, kind="submit", timeout=None):
+        seen.append(kind)
+        return _stub_tool_input()
+
+    monkeypatch.setattr(llm, "call_model", fake)
+
+    body = client.post("/api/preview", json={"query": "a rocket launch"}).json()
+    assert seen == ["preview"]
+    assert body["preview"] is True and body["tier"] == "cheap-model"
+    assert body["priority"] == "preview" and body["seq"] == 0
+    assert client.get("/api/queue").json()["count"] == 0, "a guess is not a submission"
+    assert client.get("/api/arc").json()["count"] == 0, "and not part of tonight"
+
+    submitted = client.post("/api/ingest", json={"query": "a rocket launch"}).json()
+    assert seen == ["preview", "submit"], "the real answer is not served from the preview cache"
+    assert submitted["tier"] == "dear-model" and submitted["preview"] is False
+    assert client.get("/api/queue").json()["count"] == 1
+
+
+def test_preview_respects_the_gate_and_the_blocklist(client, at_night, monkeypatch):
+    monkeypatch.setenv("GD_GATE", "auto")
+    settings.set_gate("auto")
+    assert client.post("/api/preview", json={"query": "a rocket launch"}).status_code == 423
+
+    settings.set_gate("open")
+    body = client.post("/api/preview", json={"query": "i want to kill someone"}).json()
+    assert body["result"]["tier"] == "blocked" and body["result"]["spec_draft"]["word"] == "HMM?"
+
+
+def test_previews_can_be_switched_off(client, monkeypatch):
+    monkeypatch.setattr(settings, "preview_enabled", False)
+    assert client.post("/api/preview", json={"query": "a rocket launch"}).status_code == 404
 
 
 def test_a_model_with_no_tool_call_is_just_a_failure(monkeypatch):

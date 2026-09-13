@@ -25,7 +25,7 @@ import urllib.request
 from typing import Any, Dict, Optional, Tuple
 
 from . import fallback
-from .config import settings
+from .config import Tier, settings
 from .models import Interpretation, Mood, SceneResult
 from .spec import SPEC_SCHEMA, validate
 
@@ -130,9 +130,10 @@ def _post(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: floa
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _anthropic(query: str, timeout: float) -> Dict[str, Any]:
+def _anthropic(query: str, tier: Tier, timeout: float) -> Dict[str, Any]:
+    """Messages API. No effort field is sent: Haiku has none, and Sonnet 5 already defaults high."""
     body = {
-        "model": settings.model,
+        "model": tier.model,
         "max_tokens": 1600,
         "system": [{"type": "text", "text": SYSTEM % _reference_block(),
                     "cache_control": {"type": "ephemeral"}}],
@@ -141,7 +142,7 @@ def _anthropic(query: str, timeout: float) -> Dict[str, Any]:
         "tool_choice": {"type": "tool", "name": "perform"},
         "messages": [{"role": "user", "content": query[: settings.max_chars]}],
     }
-    data = _post(ANTHROPIC_URL, body, {"x-api-key": settings.api_key,
+    data = _post(ANTHROPIC_URL, body, {"x-api-key": tier.api_key,
                                        "anthropic-version": "2023-06-01"}, timeout)
     for part in data.get("content", []):
         if part.get("type") == "tool_use" and isinstance(part.get("input"), dict):
@@ -149,23 +150,23 @@ def _anthropic(query: str, timeout: float) -> Dict[str, Any]:
     raise ValueError("no tool_use block in the response")
 
 
-def _openai(query: str, timeout: float) -> Dict[str, Any]:
+def _openai(query: str, tier: Tier, timeout: float) -> Dict[str, Any]:
     """The Responses API. Reasoning effort is the knob that buys better judgment here.
 
     Astra takes no temperature, so the only dials are the instructions and the effort. Function
     arguments come back as a JSON string rather than an object, hence the extra parse.
     """
     body = {
-        "model": settings.model,
+        "model": tier.model,
         "instructions": SYSTEM % _reference_block(),
         "input": [{"role": "user", "content": query[: settings.max_chars]}],
-        "reasoning": {"effort": settings.reasoning_effort},
+        "reasoning": {"effort": tier.effort},
         "tools": [{"type": "function", "name": "perform",
                    "description": "Perform one scene on the building",
                    "parameters": PERFORM_SCHEMA}],
         "tool_choice": {"type": "function", "name": "perform"},
     }
-    data = _post(OPENAI_URL, body, {"authorization": f"Bearer {settings.api_key}"}, timeout)
+    data = _post(OPENAI_URL, body, {"authorization": f"Bearer {tier.api_key}"}, timeout)
     for item in data.get("output", []):
         if item.get("type") == "function_call":
             args = item.get("arguments")
@@ -175,7 +176,7 @@ def _openai(query: str, timeout: float) -> Dict[str, Any]:
     raise ValueError("no function_call in the response")
 
 
-def call_model(query: str, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+def call_model(query: str, kind: str = "submit", timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """Return the raw tool arguments, or None if anything at all went wrong.
 
     Every failure is the same failure from the caller's point of view: no answer, use the local
@@ -183,18 +184,19 @@ def call_model(query: str, timeout: Optional[float] = None) -> Optional[Dict[str
     """
     if not settings.llm_available:
         return None
-    call = _openai if settings.provider == "openai" else _anthropic
+    tier = settings.tier(kind)
+    call = _openai if tier.provider == "openai" else _anthropic
     try:
-        return call(query, timeout if timeout is not None else settings.llm_timeout)
+        return call(query, tier, timeout if timeout is not None else settings.timeout(kind))
     except urllib.error.HTTPError as e:
         detail = ""
         try:
             detail = e.read().decode("utf-8")[:300]
         except Exception:
             pass
-        print(f"[llm] HTTP {e.code} from {settings.provider}: {detail}", flush=True)
+        print(f"[llm] HTTP {e.code} from {tier.provider} ({tier.model}): {detail}", flush=True)
     except Exception as e:  # timeout, DNS, TLS, malformed JSON, no tool call
-        print(f"[llm] {settings.provider} call failed ({type(e).__name__}: {e})", flush=True)
+        print(f"[llm] {tier.model} call failed ({type(e).__name__}: {e})", flush=True)
     return None
 
 
@@ -221,12 +223,15 @@ def _interpretation(raw: Any, draft: Dict[str, Any]) -> Interpretation:
     )
 
 
-def ingest(query: str) -> Tuple[SceneResult, str, int]:
+def ingest(query: str, kind: str = "submit") -> Tuple[SceneResult, str, int]:
     """One query to one scene. Returns (result, tier, latency_ms).
 
     Moderation first, so a blocked query is never sent to the API. Then the model if it is
     switched on and reachable, then the local tier. There is no path where a query goes
     unanswered.
+
+    `kind` picks the brain: "preview" is the cheap fast one for someone still deciding, "submit"
+    is the one whose answer goes on the building.
     """
     t0 = time.time()
 
@@ -236,7 +241,7 @@ def ingest(query: str) -> Tuple[SceneResult, str, int]:
     if fallback.is_blocked(query):
         return done(fallback.blocked_result(query))
 
-    raw = call_model(query) if settings.llm_available else None
+    raw = call_model(query, kind) if settings.llm_available else None
     if raw is None:
         return done(fallback.local_result(query))
 
@@ -247,7 +252,7 @@ def ingest(query: str) -> Tuple[SceneResult, str, int]:
     # The model read the whole query, so nothing is unused; its own recognizability score is
     # the honest signal here, not a coverage count.
     return done(SceneResult(
-        query=query, words=fallback.words_of(query), ok=True, tier=settings.model,
+        query=query, words=fallback.words_of(query), ok=True, tier=settings.tier(kind).model,
         match="model", unused_words=[], coverage=1.0,
         interpretation=_interpretation(raw.get("interpretation"), draft), spec_draft=draft,
     ))

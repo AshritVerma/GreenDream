@@ -91,6 +91,7 @@ class IngestResponse(BaseModel):
     latency_ms: int
     channel: str = Field("web", description="where the query came from")
     priority: str = Field("dream", description="'dream' = remote, dream material only; 'live' = on-site")
+    preview: bool = Field(False, description="true = a cheap guess, not logged and not on the building")
     gate: GateInfo
     result: SceneResult
 

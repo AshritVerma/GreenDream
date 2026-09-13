@@ -29,6 +29,11 @@ from .models import (ArcResponse, GateInfo, IngestRequest, IngestResponse, Scene
 
 SUN_REFRESH_S = 1800.0
 
+# Previews are cheap and are meant to be tried repeatedly while someone plays with their wording,
+# so they get their own far looser allowance.
+PREVIEW_SECONDS = 2.0
+PREVIEW_PER_HOUR = 120
+
 
 async def _sun_loop() -> None:
     """Keep the sun table warm off the request path."""
@@ -101,7 +106,7 @@ def index() -> Dict[str, Any]:
         "service": "greendream-llm",
         "accepting": g["accepting"],
         "phase": g["phase"],
-        "endpoints": ["POST /api/ingest", "GET /api/state", "GET /api/queue", "GET /api/arc",
+        "endpoints": ["POST /api/ingest", "POST /api/preview", "GET /api/state", "GET /api/queue", "GET /api/arc",
                       "POST /api/admin/switch", "GET /api/health"],
         "demo": "/demo",
         "docs": "/docs",
@@ -175,6 +180,49 @@ def ingest(req: IngestRequest, request: Request):
     record["review"] = "pending" if priority == "dream" else "auto"
     store.append(record)
     return payload
+
+
+@app.post("/api/preview", response_model=IngestResponse)
+def preview(req: IngestRequest, request: Request):
+    """What these words might look like, cheaply, before anyone commits to them.
+
+    Same validation, same gate, same moderation as a submission, and deliberately less than a
+    submission in every other way: the fast model, a short timeout, nothing written to the day's
+    log, nothing in tonight's arc, and a separate cache so a preview can never be promoted into
+    the real answer. A preview is a guess about the building, not a claim on it.
+    """
+    if not settings.preview_enabled:
+        raise HTTPException(status_code=404, detail="previews are switched off")
+
+    g = gate.state()
+    if not g["accepting"]:
+        return JSONResponse(status_code=423, content=gate.closed_payload(g))
+
+    allowed, retry_after = ratelimit.check(f"preview:{client_id(request)}", per_hour=PREVIEW_PER_HOUR,
+                                           seconds=PREVIEW_SECONDS)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+            content={"state": "too_many", "message": "give it a moment to think.",
+                     "retry_after_s": retry_after},
+        )
+
+    key = store.cache_key(req.query, "preview")
+    cached = store.cache_get(key)
+    if cached:
+        result, tier, latency_ms = SceneResult(**cached["result"]), f"{cached['tier']}-cached", 0
+    else:
+        result, tier, latency_ms = llm.ingest(req.query, kind="preview")
+        if tier not in ("library", "lexicon", "blocked"):
+            store.cache_put(key, {"result": result.model_dump(), "tier": tier})
+
+    return IngestResponse(
+        id=uuid.uuid4().hex[:12], seq=0, received_at=str(g["now"]),
+        tier=tier, latency_ms=latency_ms, channel=req.source, priority="preview", preview=True,
+        gate=GateInfo(mode=str(g["mode"]), phase=str(g["phase"]), accepting=True, reason=str(g["reason"])),
+        result=result,
+    )
 
 
 @app.get("/api/queue")

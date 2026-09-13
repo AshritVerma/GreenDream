@@ -115,6 +115,7 @@ DEMO_PAGE = """<!doctype html>
     <input type="text" id="q" maxlength="60" placeholder="a rocket launch" autocomplete="off">
     <div class="actions">
       <button id="send">Show me</button>
+      <button class="ghost" id="peek" title="a cheap fast guess; nothing is logged">Preview</button>
       <span class="meta count" id="count">0 / 5 words</span>
       <span class="meta" id="status"></span>
     </div>
@@ -395,6 +396,7 @@ function render(body) {
   left.innerHTML = `
     <h2>${it.title || d.title}</h2>
     <p class="said">&ldquo;${r.query.replace(/</g, '&lt;')}&rdquo; &middot; ${r.words.length} words</p>
+    ${body.preview ? '<span class="badge partial">preview &middot; not logged</span>' : ''}
     <span class="badge ${tierClass}">${r.tier}</span>
     ${r.match && r.match !== r.tier ? `<span class="badge ${(r.unused_words || []).length ? 'partial' : ''}">${r.match} match</span>` : ''}
     <span class="badge">${it.theme}</span>
@@ -467,15 +469,16 @@ async function refreshArc() {
 }
 document.getElementById('arcbtn').onclick = refreshArc;
 
-document.getElementById('send').onclick = async () => {
+async function submit(kind) {
   const status = document.getElementById('status');
   const list = words();
   if (!list.length) { status.innerHTML = '<span class="err">say something</span>'; return; }
   if (list.length > MAXW) { status.innerHTML = `<span class="err">${MAXW} words at most</span>`; return; }
-  status.textContent = 'the tower is thinking\\u2026';
+  status.textContent = kind === 'preview' ? 'guessing\\u2026' : 'the tower is thinking\\u2026';
   document.getElementById('send').disabled = true;
+  document.getElementById('peek').disabled = true;
   try {
-    const res = await fetch('/api/ingest', {
+    const res = await fetch(kind === 'preview' ? '/api/preview' : '/api/ingest', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ query: q.value.trim(), source: 'web' })
     });
@@ -491,13 +494,17 @@ document.getElementById('send').onclick = async () => {
     } else {
       status.textContent = '';
       render(body);
-      refreshArc();
+      if (!body.preview) refreshArc();   // a preview is not part of tonight
     }
   } catch (e) {
     status.innerHTML = `<span class="err">${e}</span>`;
   }
+  document.getElementById('peek').disabled = false;
   refreshState();
-};
+}
+
+document.getElementById('send').onclick = () => submit('submit');
+document.getElementById('peek').onclick = () => submit('preview');
 
 document.getElementById('flip').onclick = async () => {
   const body = {};

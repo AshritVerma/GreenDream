@@ -31,6 +31,7 @@ With no key it still answers every request — see the local tier below.
 | Route | Purpose |
 |---|---|
 | `POST /api/ingest` | the only write: one query in, one scene draft out. `423` when the gate is shut |
+| `POST /api/preview` | the same answer from the cheap fast model, not logged and not part of tonight |
 | `GET /api/state` | what the frontend polls: phase, whether it may submit, when it reopens, live view URL |
 | `GET /api/queue?since=` | what the pixel side reads: accepted scenes, oldest first, with a cursor |
 | `GET /api/arc` | the day's scenes read as one story, to seed tonight's dream |
@@ -141,8 +142,11 @@ tokens. `.env` is gitignored; **never commit a key.**
 | `OPENAI_API_KEY` | — | enables the model tier via the Responses API |
 | `ANTHROPIC_API_KEY` | — | enables it via Anthropic instead; with neither key, local only |
 | `GD_PROVIDER` | `auto` | `openai` \| `anthropic` \| `auto` (whichever key exists, OpenAI first) |
-| `GD_MODEL` | `gpt-6-astra` / `claude-haiku-4-5` | model id, per provider |
+| `GD_MODEL` | `gpt-6-astra` / `claude-sonnet-5` | the submit model, per provider |
 | `GD_REASONING_EFFORT` | `high` | OpenAI only: `low` … `max` |
+| `GD_PREVIEW_MODEL` | `gpt-5.6-luna` / `claude-haiku-4-5` | the cheap model behind `/api/preview` |
+| `GD_PREVIEW_EFFORT` | `low` | effort for previews |
+| `GD_PREVIEW` | `1` | `0` disables `POST /api/preview` |
 | `GD_USE_LLM` | `1` | `0` forces the local tier even with a key |
 | `GD_GATE` | `auto` | `auto` / `open` / `closed` |
 | `GD_MAX_WORDS` / `GD_MAX_CHARS` | `5` / `60` | how much a person may say |

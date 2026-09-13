@@ -15,9 +15,10 @@ renders nothing; the pixel side comes later. A day of those scenes becomes one *
 | One query of up to 5 words, 6 words rejected | done | `app/models.py::IngestRequest` |
 | Honest match reporting: `match`, `unused_words`, `coverage` | done | `app/fallback.py::local_result` |
 | `beats`: a scene is an event in time, not a held picture | done | `app/spec.py::_beats`, `app/fallback.py::BEATS` |
-| Two providers behind one call; `gpt-6-astra` at high effort by default | done | `app/llm.py::call_model` |
+| Two providers behind one call, two price tiers | done | `app/llm.py::call_model` |
+| Cheap preview vs paid submission | done | `POST /api/preview` |
 | The sprite / no-sprite decision belongs to the model | done | `app/llm.py::SYSTEM` |
-| Claude tier: one tool-use call, cached system prompt | done, never run against the real API | `app/llm.py` |
+| Model tier: one forced tool call, cached system prompt | done, never run against the real API | `app/llm.py` |
 | Local tier: warm library of 12 scenes, then an affect lexicon | done, fully offline | `app/fallback.py` |
 | Spec draft validated and clamped on every path | done | `app/spec.py::validate` |
 | Day-level arc (quiet open, loud middle, quiet close) | done | `app/fallback.py::compose_arc`, `GET /api/arc` |
@@ -104,12 +105,58 @@ means the whole facade carries the scene through world, palette, motion, particl
 `spec.validate()` still throws away sprites that are a speck, a solid slab, or featureless, so a
 bad call degrades rather than reaching the windows.
 
-That judgment is also why the default provider is OpenAI's `gpt-6-astra` at `reasoning.effort=high`
-rather than the cheapest model that can fill in a schema. Anything can emit valid JSON; deciding
-that "lebron dunk as 76er" wants Sixers red and a rising leap but no jersey drawing is the actual
-work. Anthropic remains available behind `GD_PROVIDER=anthropic`, and both are one function,
-`call_model`, whose every failure mode is identical from the caller's side: no answer, fall through
-to the local tier. The building never waits on a vendor.
+That judgment is also why the model tier matters more than a schema-filler would: anything can emit
+valid JSON, but deciding that "lebron dunk as 76er" wants Sixers red and a rising leap and *no*
+jersey drawing is the actual work.
+
+## Two price tiers, because a guess and a commitment are different things
+
+Somebody standing at the kiosk trying wordings should not be spending the same money as somebody
+who has decided. So there are two calls:
+
+| | `POST /api/preview` | `POST /api/ingest` |
+|---|---|---|
+| model | `GD_PREVIEW_MODEL`, cheapest available | `GD_MODEL`, the good one |
+| effort | `low` | `high` |
+| timeout | 4 s — nobody waits for a guess | 8 s |
+| rate limit | one every 2 s, 120/hour | one every 20 s, 20/hour |
+| written to the day's log | no | yes |
+| part of tonight's arc | no | yes |
+
+Same key, same provider, same validation, same gate, same blocklist. The two caches are separate
+namespaces (`preview:` and `submit:` prefixes) specifically so a cheap guess can never be promoted
+into the answer that goes on the building. A preview comes back marked `preview: true` with
+`priority: "preview"`, so a frontend can show it as provisional, and `GD_PREVIEW=0` turns the
+endpoint off entirely.
+
+Current defaults, on an Anthropic key: `claude-haiku-4-5` ($1/$5 per Mtok, and no reasoning dial at
+all, which is exactly what a preview wants) for previews, `claude-sonnet-5` ($2/$10, effort already
+defaults to high) for submissions.
+
+Both providers are one function, `call_model`, whose every failure mode is identical from the
+caller's side: no answer, fall through to the local tier. The building never waits on a vendor.
+
+## Later: move the submit tier to gpt-6-astra
+
+The intended end state for a submission is OpenAI's `gpt-6-astra` at `reasoning.effort=high`. That
+code path is written and tested against a stubbed Responses API; it has never run against the real
+one. To switch:
+
+```powershell
+$env:OPENAI_API_KEY = "sk-..."   # or put it in .env, which is gitignored
+$env:GD_PROVIDER = "openai"      # or leave it "auto", which prefers OpenAI when the key exists
+```
+
+That is the whole change: `GD_MODEL` and `GD_PREVIEW_MODEL` default per provider, so submissions go
+to `gpt-6-astra` at high effort and previews to `gpt-5.6-luna` at low. Worth knowing before
+flipping it — astra is $10/$50 per Mtok against Sonnet 5's $2/$10, which lands around 3-5 cents per
+submission once the system prompt is cached. Fine for a plaza on a Friday night, less fine as a
+default nobody remembers leaving on, which is why `xhigh` and `max` are accepted by the config but
+are not the default.
+
+Open question for when that happens: whether the reference specs in the system prompt
+(`thunderstorm` and `rocket launch`, sent as the standard to match) should be rewritten by the
+better model, or stay hand-written as the house style.
 
 ## Why five words and not five phrases
 
