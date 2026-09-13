@@ -29,13 +29,14 @@ from common.inputs import Timeline
 from sensors.weather import WeatherSensor
 
 from dream import DreamPlayer, compose_async
-from genie import request_async
+from genie import clip_words, request_async
 from pages import JOURNAL_PAGE, SAY_PAGE
-from scene import Performance
+from scene import Performance, validate
 from worlds import mix
 
 HOLD = 5.0
 QUEUE_MAX = 5
+ONSITE = ("pedestal", "onsite", "qr", "plaza", "speech")   # channels whose prompts perform live by default
 
 
 def _hour_of(iso: str, default: float) -> float:
@@ -44,6 +45,15 @@ def _hour_of(iso: str, default: float) -> float:
         return d.hour + d.minute / 60.0
     except Exception:
         return default
+
+
+def _shown(spec: dict) -> dict:
+    """What the building actually made of a prompt, for the journal and /api/journal.
+
+    `word` is the only text the facade ever displays, so a log that omits it cannot answer
+    the one question an operator gets asked: what did it say?
+    """
+    return {"title": spec["title"], "ok": spec["ok"], "world": spec["world"], "word": spec["word"]}
 
 
 class GreenDream(App):
@@ -95,6 +105,7 @@ class GreenDream(App):
         self.stage_t0 = 0.0
         self.dream_pending = False
         self.dreams_tonight: list = []
+        self.dream_material: list = []        # the snapshot of self.day the current script indexes into
         self.mumble: tuple | None = None      # (t, accent) sleep-talk acknowledgement
         self.marquee: Marquee | None = None
         self.journal_dir = getattr(ctx.args, "journal", "journal")
@@ -133,15 +144,24 @@ class GreenDream(App):
             ev_text = ev["text"].strip()
             request_async(ev_text, ctx.bus, offline=self.offline, source=ev.get("source", "web"))
         elif t == "spec":
-            self.pending = max(0, self.pending - 1)
-            self.last_tier = ev.get("tier", "?")
-            entry = {"when": f"{int(self.hour):02d}:{int((self.hour % 1) * 60):02d}", "text": ev.get("text"), "spec": ev["spec"], "channel": ev.get("source", "web"), "ts": time.time()}
+            # A finished scene, from our own genie thread or pushed in by the language service.
+            # Either way it is re-validated here: this is the last gate before the windows.
+            spec = validate(ev.get("spec"))
+            if ev.get("origin") == "genie":
+                self.pending = max(0, self.pending - 1)
+            channel = str(ev.get("source", "web"))[:32]
+            # "live" performs now (default; every on-site channel is live); "dream" is material for tonight only
+            priority = ev.get("priority") if ev.get("priority") in ("live", "dream") else "live"
+            self.last_tier = str(ev.get("tier", "external"))[:40]
+            entry = {"when": f"{int(self.hour):02d}:{int((self.hour % 1) * 60):02d}", "text": clip_words(ev.get("text") or spec["title"]),
+                     "spec": spec, "channel": channel, "priority": priority, "tier": self.last_tier,
+                     "latency_ms": int(ev.get("latency_ms") or 0), "ts": time.time()}
             self.day.append(entry)
             self._journal_append(entry)
-            if self.phase in ("DAY", "DAWN"):
-                self.queue.append(ev["spec"])
-            else:  # asleep: sleep-talk — acknowledge faintly, weave into the next dream
-                self.mumble = (ctx.t, ev["spec"]["palette"]["accent"])
+            if self.phase in ("DAY", "DAWN") and priority == "live":
+                self.queue.append(spec)
+            else:  # asleep, or dream material only: acknowledge faintly, weave into the next dream
+                self.mumble = (ctx.t, spec["palette"]["accent"])
         elif t == "dream_script":
             self.dream_script = ev["script"]
             self.dream_pending = False
@@ -165,21 +185,22 @@ class GreenDream(App):
     # ---------------------------------------------------------------- journal
     def _journal_append(self, entry: dict) -> None:
         try:
-            with open(os.path.join(self.journal_dir, datetime.now().strftime("%Y-%m-%d") + ".jsonl"), "a") as f:
-                f.write(json.dumps({k: v for k, v in entry.items() if k != "spec"} | {"title": entry["spec"]["title"]}) + "\n")
-        except Exception:
-            pass
+            with open(os.path.join(self.journal_dir, datetime.now().strftime("%Y-%m-%d") + ".jsonl"), "a", encoding="utf-8") as f:
+                f.write(json.dumps({k: v for k, v in entry.items() if k != "spec"} | _shown(entry["spec"])) + "\n")
+        except Exception as e:
+            print(f"[journal] write failed: {e}", flush=True)
 
     def _journal_dream(self, ev: dict) -> None:
         try:
-            with open(os.path.join(self.journal_dir, datetime.now().strftime("%Y-%m-%d") + ".dreams.jsonl"), "a") as f:
+            with open(os.path.join(self.journal_dir, datetime.now().strftime("%Y-%m-%d") + ".dreams.jsonl"), "a", encoding="utf-8") as f:
                 f.write(json.dumps({"cycle": ev.get("cycle"), "tier": ev.get("tier"), "script": ev["script"], "ts": time.time()}) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[journal] write failed: {e}", flush=True)
 
     def journal_json(self) -> dict:
         return {"phase": self.phase, "hour": round(self.hour, 2), "sunrise": self.sunrise, "sunset": self.sunset,
-                "prompts": [{"when": d["when"], "text": d["text"], "title": d["spec"]["title"], "channel": d["channel"]} for d in self.day],
+                "prompts": [{"when": d["when"], "text": d["text"], "channel": d["channel"],
+                             "priority": d.get("priority", "live"), "tier": d.get("tier", "-")} | _shown(d["spec"]) for d in self.day],
                 "dreams": [{"cycle": d["cycle"], "tier": d["tier"], "title": d["script"]["title"], "logline": d["script"]["logline"],
                             "scenes": [dict(s, act=a["name"]) for a in d["script"]["acts"] for s in a["scenes"]]} for d in self.dreams_tonight],
                 "now": (self.dream.current["note"] if (self.dream and self.dream.current) else (self.current.spec["title"] if self.current else "")) }
@@ -243,6 +264,7 @@ class GreenDream(App):
             self.queue.clear()
             self.current = None
             self.daydream = None
+            self.marquee = Marquee("GOOD NIGHT", (0.6, 0.6, 1.0), speed=6.0)
         elif phase == "NIGHT":
             self.dream_stage, self.stage_t0 = "descent", t
             self.dream = None
@@ -286,8 +308,9 @@ class GreenDream(App):
         else:
             out = self._idle_awake(t, dt)
             # daydream: a short faint replay of something it was told
-            if self.day and self.daydream is None and t - self.last_request_t > 25 and self.rng.random() < dt * 0.04:
-                spec = dict(self.rng.choice(self.day)["spec"], duration_s=6, word=None)
+            memories = [d for d in self.day if d["spec"]["ok"]]
+            if memories and self.daydream is None and t - self.last_request_t > 25 and self.rng.random() < dt * 0.04:
+                spec = dict(self.rng.choice(memories)["spec"], duration_s=6, word=None, beats=[])
                 self.daydream = Performance(spec, t, seed=self.rng.randrange(1 << 30))
             if self.daydream:
                 d = self.daydream.render(t, dt)
@@ -349,9 +372,12 @@ class GreenDream(App):
             if not self.dream_pending and self.dream_script is None:
                 self.dream_cycle += 1
                 self.dream_pending = True
-                compose_async(self.day, self.dream_cycle, offline=self.offline, seed=self.rng.randrange(1000))
+                # a snapshot: the composer thread reads it while sleep-talk keeps appending to self.day,
+                # and the script's source ids must index into exactly this list. Refusals do not dream.
+                self.dream_material = [d for d in self.day if d["spec"].get("ok", True)]
+                compose_async(self.dream_material, self.dream_cycle, offline=self.offline, seed=self.rng.randrange(1000))
             if self.dream_script is not None and e > 6.0:
-                self.dream = DreamPlayer(self.dream_script, self.day, t, self.rng.randrange(1 << 30))
+                self.dream = DreamPlayer(self.dream_script, self.dream_material, t, self.rng.randrange(1 << 30))
                 self.dream_script = None
                 self.dream_stage, self.stage_t0 = "dream", t
             # REM onset: faint flickers of colour

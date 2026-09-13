@@ -4,8 +4,9 @@ A separate process from the runner on purpose. It holds no phase, drives no
 display and pushes nothing onto the InputBus, so it can face the public while the
 machine driving the building stays unreachable.
 
-    python render.py                    # preview page on :8110
-    python render.py --offline          # never call the API
+    python render.py                                    # preview page on :8110, interpreting locally
+    python render.py --offline                          # never call the API
+    python render.py --ingest http://localhost:8100     # interpret through the language service
 
     POST /digest {"text": "..."}   -> {spec, seed, t0, rec, tier}
     POST /render {"spec": {...}}   -> {rec}
@@ -15,7 +16,13 @@ machine driving the building stays unreachable.
 to come here to become pixels.
 
 ``/digest`` interprets a phrase without any side effect, which is what a preview
-needs - posting to the ingest service would enqueue every idle sketch.
+needs - posting to the ingest service's ``/api/ingest`` would enqueue every idle sketch.
+
+With ``--ingest URL`` the interpretation comes from that service's ``/api/preview``
+instead of this repo's own tiers, and only the pixels are made here. That is the
+mode to run in front of people: what the preview shows is then the same reading of
+the words that the building will perform, rather than a second opinion about them.
+Any failure over there falls through to the local tiers, so the page never stalls.
 """
 
 from __future__ import annotations
@@ -25,6 +32,8 @@ import json
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 import zlib
 from collections import OrderedDict, deque
 from datetime import date
@@ -46,6 +55,10 @@ DECIMATE = 2      # ...but playing back every other frame costs half the bytes a
 
 DAILY_MODEL_CALLS = int(os.environ.get("GREENDREAM_DAILY_MODEL_CALLS", "400"))
 IP_PER_MINUTE = int(os.environ.get("GREENDREAM_IP_PER_MINUTE", "12"))
+
+INGEST_URL = os.environ.get("GREENDREAM_INGEST_URL", "").strip().rstrip("/")
+INGEST_TOKEN = os.environ.get("GD_INGEST_TOKEN", "").strip()
+INGEST_TIMEOUT = float(os.environ.get("GREENDREAM_INGEST_TIMEOUT", "6"))
 
 
 # ---------------------------------------------------------------------------- render
@@ -86,18 +99,62 @@ def seed_for(text: str) -> int:
 
 # ---------------------------------------------------------------------------- digest
 
-def digest(text: str, offline: bool = False, budget: Optional["Budget"] = None) -> Tuple[dict, str]:
-    """Text -> validated spec, by the same three tiers the building uses.
+def ingest_digest(text: str, url: str, timeout: float = INGEST_TIMEOUT) -> Optional[Tuple[dict, str]]:
+    """Ask the language service what these words mean. None on any trouble.
+
+    ``/api/preview`` is the right endpoint for a sketch: same validation, same gate and
+    same moderation as a submission, but nothing is written to the day's log and nothing
+    enters tonight's arc. Its ``spec_draft`` still goes through ``validate`` here, because
+    a spec from another process is input like any other.
+    """
+    body = json.dumps({"query": text, "source": "preview"}).encode()
+    headers = {"Content-Type": "application/json"}
+    if INGEST_TOKEN:
+        headers["X-Ingest-Token"] = INGEST_TOKEN
+    req = urllib.request.Request(f"{url}/api/preview", data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode()[:200]
+        except Exception:
+            pass
+        print(f"[render] ingest HTTP {e.code}: {detail}", flush=True)
+        return None
+    except Exception as e:
+        print(f"[render] ingest unreachable ({type(e).__name__}: {e}); interpreting locally", flush=True)
+        return None
+    result = data.get("result") if isinstance(data, dict) else None
+    draft = result.get("spec_draft") if isinstance(result, dict) else None
+    if not isinstance(draft, dict):
+        return None
+    tier = str(data.get("tier") or result.get("tier") or "ingest")
+    return validate(draft), tier
+
+
+def digest(text: str, offline: bool = False, budget: Optional["Budget"] = None,
+           ingest_url: str = "") -> Tuple[dict, str]:
+    """Text -> validated spec, by the same tiers the building uses.
 
     ``BLOCKLIST`` is checked here because neither ``lookup`` nor ``lexicon_spec``
     does, and this is the one path where a phrase becomes pixels without the model
     ever having had the chance to refuse it.
+
+    With ``ingest_url`` the language service does the interpreting, so the preview and
+    the performance read the words the same way. It is tried before the local library:
+    the point of the mode is that the answer comes from over there.
     """
     text = clip_words(text)
     if not text:
         return validate(SHRUG), "empty"
     if BLOCKLIST.search(text):
         return validate(SHRUG), "blocked"
+    if ingest_url:
+        got = ingest_digest(text, ingest_url)
+        if got is not None:
+            return got
     raw = lookup(text)
     if raw is not None:
         return validate(raw), "library"
@@ -112,10 +169,12 @@ class SpecCache:
     """One digest per distinct phrase, keyed the way the library already matches.
 
     Lexicon answers are deliberately not cached: they mean the model was skipped
-    or unreachable, and caching one would make a temporary outage permanent.
+    or unreachable, and caching one would make a temporary outage permanent. The
+    test is on the tier name rather than a list, because in ``--ingest`` mode the
+    tier is whatever the service called itself.
     """
 
-    CACHEABLE = ("library", "blocked", "empty")
+    NEVER = ("lexicon", "ingest")
 
     def __init__(self, cap: int = 2048):
         self.cap = cap
@@ -131,7 +190,7 @@ class SpecCache:
             return hit
 
     def put(self, text: str, spec: dict, tier: str) -> None:
-        if tier not in self.CACHEABLE and tier != MODEL:
+        if any(tier.startswith(n) for n in self.NEVER):
             return
         k = normalize(clip_words(text))
         with self._lock:
@@ -207,8 +266,9 @@ class Service:
     """
 
     def __init__(self, offline: bool = False, cache: Optional[SpecCache] = None,
-                 budget: Optional[Budget] = None, clip_cap: int = 48):
+                 budget: Optional[Budget] = None, clip_cap: int = 48, ingest_url: str = INGEST_URL):
         self.offline = offline
+        self.ingest_url = (ingest_url or "").rstrip("/")
         self.cache = cache if cache is not None else SpecCache()
         self.budget = budget if budget is not None else Budget()
         self.clip_cap = clip_cap
@@ -236,7 +296,7 @@ class Service:
         if hit is not None:
             spec, tier = hit
         else:
-            spec, tier = digest(text, offline=self.offline, budget=self.budget)
+            spec, tier = digest(text, offline=self.offline, budget=self.budget, ingest_url=self.ingest_url)
             self.cache.put(text, spec, tier)
         seed = seed_for(text)
         rec, from_clips = self._clip(normalize(text), spec, seed)
@@ -255,7 +315,14 @@ class Service:
                 "rec": render_spec(spec, seed=seed, t0=t0)}
 
     def warm(self, phrases=None) -> int:
-        """Pre-render the library so the chips and the common phrases answer instantly."""
+        """Pre-render the library so the chips and the common phrases answer instantly.
+
+        Skipped in ``--ingest`` mode: warming there would spend the service's preview
+        allowance on phrases nobody asked for, and caching a local answer under a phrase
+        would later serve it as though the service had given it.
+        """
+        if self.ingest_url:
+            return 0
         done = 0
         for phrase in (list(LIBRARY) if phrases is None else list(phrases)):
             try:
@@ -266,8 +333,9 @@ class Service:
         return done
 
 
-def serve(port: int = DEFAULT_PORT, host: str = "0.0.0.0", offline: bool = False, warm: bool = True) -> ThreadingHTTPServer:
-    service = Service(offline=offline)
+def serve(port: int = DEFAULT_PORT, host: str = "0.0.0.0", offline: bool = False, warm: bool = True,
+          ingest_url: str = INGEST_URL) -> ThreadingHTTPServer:
+    service = Service(offline=offline, ingest_url=ingest_url)
     page = preview_html()
     js = facade_js()
     if warm:
@@ -278,6 +346,15 @@ def serve(port: int = DEFAULT_PORT, host: str = "0.0.0.0", offline: bool = False
 
         def log_message(self, fmt, *args):
             pass
+
+        def handle_one_request(self):
+            # A client that walks away mid-request is normal, not an incident. Without this,
+            # every closed keep-alive connection prints a traceback, and the one message that
+            # matters ("ingest unreachable") gets lost in it.
+            try:
+                super().handle_one_request()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                self.close_connection = True
 
         def _send(self, code: int, body: bytes, ctype: str = "text/html; charset=utf-8"):
             self.send_response(code)
@@ -311,6 +388,7 @@ def serve(port: int = DEFAULT_PORT, host: str = "0.0.0.0", offline: bool = False
                 return self._send(200, js.encode(), "application/javascript")
             if path == "/healthz":
                 return self._json(200, {"ok": True, "offline": service.offline,
+                                        "interpreter": service.ingest_url or "local",
                                         "cached_phrases": len(service.cache),
                                         "cached_clips": len(service._clips),
                                         **service.budget.state()})
@@ -343,10 +421,16 @@ def serve(port: int = DEFAULT_PORT, host: str = "0.0.0.0", offline: bool = False
             except Exception as e:  # pragma: no cover
                 return self._json(500, {"ok": False, "error": str(e)})
 
-    httpd = ThreadingHTTPServer((host, port), Handler)
-    httpd.daemon_threads = True
-    print(f"[render] digest + preview on http://localhost:{port}"
-          f"{'  (offline)' if offline else ''}", flush=True)
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):
+            pass   # already handled above; nothing here is worth a traceback on stderr
+
+    httpd = Server((host, port), Handler)
+    where = f"interpreting via {service.ingest_url}" if service.ingest_url else "interpreting locally"
+    print(f"[render] digest + preview on http://localhost:{port}  ({where}"
+          f"{', offline' if offline else ''})", flush=True)
     return httpd
 
 
@@ -356,8 +440,12 @@ def main(argv=None) -> None:
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--offline", action="store_true", help="never call the API (library + lexicon only)")
     p.add_argument("--no-warm", action="store_true", help="skip pre-rendering the library at startup")
+    p.add_argument("--ingest", default=INGEST_URL, metavar="URL",
+                   help="interpret through the language service instead of this repo's tiers, "
+                        "e.g. http://localhost:8100 (so the preview and the building agree)")
     args = p.parse_args(argv)
-    httpd = serve(port=args.port, host=args.host, offline=args.offline, warm=not args.no_warm)
+    httpd = serve(port=args.port, host=args.host, offline=args.offline, warm=not args.no_warm,
+                  ingest_url=args.ingest)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -22,12 +22,14 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
+import urllib.request
 from typing import List, Optional
 
 import numpy as np
 
-from utilities.display import Color, Display, Frame
+from utilities.display import Display, Frame
 
 from .canvas import COLS, ROWS
 
@@ -204,11 +206,15 @@ class UDPDisplay(Display):
 
 
 class HTTPDisplay(Display):
-    """POST each frame as JSON to a URL (fire-and-forget on a thread)."""
+    """POST each frame as JSON to a URL (fire-and-forget on a thread).
+
+    One request in flight at a time: at 30 fps a slow endpoint would otherwise be handed a
+    new thread every 33 ms. The claim on that slot is taken under a lock, because the frame
+    loop and the worker that clears it are different threads and a lost race here means
+    unbounded threads rather than a dropped frame.
+    """
 
     def __init__(self, url: str):
-        import threading
-
         self.url = url
         self._lock = threading.Lock()
         self._busy = False
@@ -217,11 +223,10 @@ class HTTPDisplay(Display):
         return Frame()
 
     def send(self, frame):
-        import threading
-        import urllib.request
-
-        if self._busy:
-            return  # skip a frame rather than queue up
+        with self._lock:
+            if self._busy:
+                return  # skip a frame rather than queue up
+            self._busy = True
         payload = json.dumps({"rows": ROWS, "cols": COLS, "pixels": frame_to_list(frame)}).encode()
 
         def go():
@@ -231,9 +236,9 @@ class HTTPDisplay(Display):
             except Exception:
                 pass
             finally:
-                self._busy = False
+                with self._lock:
+                    self._busy = False
 
-        self._busy = True
         threading.Thread(target=go, daemon=True).start()
 
 

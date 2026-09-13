@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from common.canvas import COLS, RR, ROWS, Canvas, Marquee, blit_mask, clamp, hex_rgb, lerp, lerp_rgb
+from common.canvas import COLS, ROWS, Canvas, Marquee, blit_mask, clamp, hex_rgb, lerp
 from common.inputs import BUS, InputBus
 
 from scene import Performance, validate
@@ -60,16 +60,24 @@ All day, people told the building what they wanted to see (a list of prompts wit
 Tonight it dreams: write a dream that connects those prompts into one arc — opening, rising, turn, climax,
 resolution, coda — the way dreams do: things recur, merge, grow, dissolve, and the last image echoes the first.
 Rules: reuse the day's prompts by id (1 or 2 per scene). Prefer the ones that recurred or were vivid.
+Each prompt names the channel it arrived on. Prompts said at the building (pedestal, plaza, qr, speech) were
+witnessed in person: open and close the dream with them. Remote prompts (web, phone, sms) fill the middle.
 Dream ops: slow (gentle), recolor (dream palette), merge (two prompts become one thing), echo (it repeats),
 fragment (it dissolves into sparks), invert (it falls instead of rises), storm-of (it rains tiny copies), loop.
 Keep 6-10 scenes, total 2-4 minutes. Title: one word, uppercase, at most 7 letters. Be poetic but concrete.
 Answer only by calling the tool."""
 
+ONSITE = ("pedestal", "onsite", "qr", "plaza", "speech")
+
 
 # ---------------------------------------------------------------------------- composers
 
 def compose_offline(day: List[dict], seed: int = 0, cycle: int = 1) -> Dict[str, Any]:
-    """A deterministic arc: first thing → energetic middle → contrasting turn → merge climax → calm → echo."""
+    """A deterministic arc: first thing → energetic middle → contrasting turn → merge climax → calm → echo.
+
+    Presence is the price of immediacy: if anything was said at the building itself, the dream
+    opens with the first of those and closes on the last; remote prompts fill the middle.
+    """
     rng = random.Random(seed + cycle)
     n = len(day)
     if n == 0:
@@ -81,14 +89,16 @@ def compose_offline(day: List[dict], seed: int = 0, cycle: int = 1) -> Dict[str,
     for d in day:
         counts[d["spec"]["title"]] = counts.get(d["spec"]["title"], 0) + 1
     popular = sorted(range(n), key=lambda i: -counts[day[i]["spec"]["title"]])
-    first = 0
+    onsite = [i for i in range(n) if day[i].get("channel") in ONSITE]
+    first = onsite[0] if onsite else 0
+    last = onsite[-1] if onsite else first
     acts = [
         {"name": "opening", "scenes": [{"sources": [first], "op": "slow", "duration_s": 14, "transition": "dissolve", "note": f"the day begins again with {day[first]['text']}"}]},
         {"name": "rising", "scenes": [{"sources": [i], "op": rng.choice(["echo", "loop", "recolor"]), "duration_s": 10, "transition": "elevator", "note": f"{day[i]['text']} returns"} for i in by_arousal[:2]]},
         {"name": "turn", "scenes": [{"sources": [by_valence[0]], "op": "invert", "duration_s": 12, "transition": "blinds", "note": f"{day[by_valence[0]]['text']}, upside down"}]},
         {"name": "climax", "scenes": [{"sources": popular[:2] if n > 1 else [popular[0]], "op": "merge" if n > 1 else "storm-of", "duration_s": 16, "transition": "warp", "note": "two things become one thing"}]},
         {"name": "resolution", "scenes": [{"sources": [by_arousal[-1]], "op": "slow", "duration_s": 14, "transition": "iris", "note": f"{day[by_arousal[-1]]['text']}, slowly"}]},
-        {"name": "coda", "scenes": [{"sources": [first], "op": "fragment", "duration_s": 12, "transition": "dissolve", "note": "the first thing dissolves"}]},
+        {"name": "coda", "scenes": [{"sources": [last], "op": "fragment", "duration_s": 12, "transition": "dissolve", "note": f"{day[last]['text']} dissolves" if last != first else "the first thing dissolves"}]},
     ]
     title = re.sub(r"[^A-Z]", "", day[popular[0]]["spec"]["title"].upper().split()[0] if day[popular[0]]["spec"]["title"] else "DREAM")[:7] or "DREAM"
     star = day[popular[0]]["text"] if popular[0] != first else (day[by_arousal[0]]["text"] if by_arousal[0] != first else None)
@@ -101,7 +111,7 @@ def compose_claude(day: List[dict], cycle: int = 1, timeout: float = 20.0) -> Op
     if not key or not day:
         return None
     model = os.environ.get("ANTHROPIC_MODEL_DREAM", os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5"))
-    listing = "\n".join(f"{i}: [{d.get('when', '?')}] \"{d['text']}\" (mood v={d['spec']['mood']['valence']:+.1f} a={d['spec']['mood']['arousal']:.1f}, shown as: {d['spec']['title']})" for i, d in enumerate(day))
+    listing = "\n".join(f"{i}: [{d.get('when', '?')} via {d.get('channel', 'web')}] \"{d['text']}\" (mood v={d['spec']['mood']['valence']:+.1f} a={d['spec']['mood']['arousal']:.1f}, shown as: {d['spec']['title']})" for i, d in enumerate(day))
     body = {"model": model, "max_tokens": 1500, "system": DREAM_SYSTEM,
             "tools": [{"name": "dream", "description": "Write tonight's dream", "input_schema": DREAM_SCHEMA}], "tool_choice": {"type": "tool", "name": "dream"},
             "messages": [{"role": "user", "content": f"Dream cycle {cycle} of the night. Today's prompts:\n{listing}"}]}
@@ -151,7 +161,8 @@ def compose_async(day: List[dict], cycle: int, bus: InputBus = BUS, offline: boo
             if script:
                 tier = "claude"
         if script is None:
-            script = compose_offline(day, seed, cycle)
+            # the offline composer is trusted, but it goes through the same gate so the two paths cannot drift
+            script = validate_script(compose_offline(day, seed, cycle), len(day)) or compose_offline([], seed, cycle)
         bus.push({"type": "dream_script", "script": script, "tier": tier, "cycle": cycle})
 
     threading.Thread(target=go, daemon=True).start()
@@ -169,6 +180,8 @@ def dream_spec(spec: dict, op: str, rng: random.Random, partner: Optional[dict] 
     s = json.loads(json.dumps(spec))
     s["palette"] = {"base": DREAM_BASE, "accent": rng.choice(DREAM_ACCENTS), "glow": "#e8e4ff"}
     s["word"] = None
+    for b in s.get("beats") or []:   # dreams are wordless; the choreography stays
+        b["word"] = None
     s["tempo_bpm"] = max(30, s["tempo_bpm"] * 0.6)
     s["motion"] = dict(s["motion"], speed=s["motion"]["speed"] * 0.6)
     if op == "slow":

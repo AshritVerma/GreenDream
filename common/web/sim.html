@@ -71,7 +71,16 @@
   const logEl = document.getElementById('log');
   let frames = 0, lastFps = performance.now();
   function log(s){ const d = new Date(); logEl.textContent = (d.toLocaleTimeString() + '  ' + s + '\n' + logEl.textContent).slice(0, 4000); }
-  function post(ev){ ev.source = ev.source || 'web'; fetch('/input', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(ev)}).catch(()=>{}); }
+  // The operator token (GREENDREAM_INPUT_TOKEN) rides along from ?key=... so the control panel keeps working when the app is locked down.
+  const KEY = new URLSearchParams(location.search).get('key') || '';
+  function post(ev){
+    ev.source = ev.source || 'web';
+    const headers = {'Content-Type':'application/json'};
+    if (KEY) headers['X-Input-Token'] = KEY;
+    fetch('/input', {method:'POST', headers, body: JSON.stringify(ev)})
+      .then(r => { if (!r.ok) return r.json().then(j => log('refused: ' + (j.error || r.status))).catch(() => log('refused: ' + r.status)); })
+      .catch(()=>{});
+  }
   window.addEventListener('resize', () => { facade.resize(); facade.draw(facade.last); });
 
   // ---- frame stream

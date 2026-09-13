@@ -58,11 +58,19 @@ def test_blocklist_is_enforced_here_not_only_in_genie():
     spec, tier = digest("kill everyone", offline=True)
     assert tier == "blocked"
     assert spec["title"] == "shrug"
+    assert spec["ok"] is False, "a refusal is flagged, so it never becomes dream material"
+
+
+def test_a_refusal_is_still_renderable():
+    # ok=False marks it as a refusal for the journal and the dream composer; it is
+    # nonetheless a complete spec, because the tower still has to show something.
+    spec, _ = digest("kill everyone", offline=True)
+    assert spec["word"] == "HMM?" and render_spec(spec, seed=1)["frames"]
 
 
 def test_empty_text_does_not_explode():
     spec, tier = digest("   ", offline=True)
-    assert tier == "empty" and spec["ok"]
+    assert tier == "empty" and spec["title"] == "shrug"
 
 
 # ---------------------------------------------------------------------- render

@@ -18,13 +18,16 @@ import numpy as np
 from common.canvas import (CC, COLS, RR, ROWS, Canvas, Marquee, blit_mask, clamp,
                            hex_rgb, lerp, lerp_rgb)
 
-from worlds import WORLDS, mix
+from worlds import WORLDS
 
 WORLD_NAMES = list(WORLDS) + ["none"]
 MOTIONS = ["rise", "fall", "sweep", "pulse", "shake", "spiral", "breathe", "still"]
 PARTICLES = ["rain", "snow", "sparks", "stars", "bubbles", "confetti", "none"]
 FLASHES = ["lightning", "burst", "none"]
 SPRITE_ANIMS = ["rise", "fall", "bounce", "pulse", "hold"]
+MAX_BEATS = 4
+BEAT_FLOOR = 0.3      # no beat may sit darker than this: from the street a near-black tower reads as broken
+BEAT_RAMP_S = 0.8     # how long a beat takes to fade its brightness in from the previous one
 
 # The JSON schema handed to the model as a tool definition (also documents v1).
 SCHEMA: Dict[str, Any] = {
@@ -42,6 +45,16 @@ SCHEMA: Dict[str, Any] = {
         "sprite": {"type": ["object", "null"], "properties": {"rows": {"type": "array", "items": {"type": "string"}, "description": "up to 12 strings of exactly 9 chars, '#' lit '.' dark; bold simple silhouettes only"}, "anim": {"type": "string", "enum": SPRITE_ANIMS}, "color": {"type": "string"}}},
         "word": {"type": ["string", "null"], "description": "optional reply shown as a vertical marquee; 1-7 chars, A-Z ! ? only"},
         "mood": {"type": "object", "properties": {"valence": {"type": "number"}, "arousal": {"type": "number"}}},
+        "beats": {"type": "array", "maxItems": MAX_BEATS, "description":
+                  "2-4 phases in time, so the scene is an event rather than a held picture: what builds, what lands, what is left. "
+                  "Omit only for scenes that genuinely just sit there. A beat overrides the fields it names and inherits the rest.",
+                  "items": {"type": "object", "properties": {
+                      "at": {"type": "number", "minimum": 0, "maximum": 1, "description": "start, as a fraction of duration_s"},
+                      "label": {"type": "string", "description": "2-3 words: 'the leap', 'impact', 'settling'"},
+                      "motion": {"type": "object"}, "particles": {"type": "object"}, "flash": {"type": "object"},
+                      "brightness": {"type": "number", "minimum": 0, "maximum": 1},
+                      "word": {"type": ["string", "null"], "description": "null to stay silent until the beat that earns the word"},
+                  }}},
     },
     "required": ["ok", "title", "world", "motion", "particles", "flash", "sprite", "word"],
 }
@@ -51,36 +64,94 @@ def _hex(v, default: str) -> str:
     return v if isinstance(v, str) and re.fullmatch(r"#?[0-9a-fA-F]{6}", v) else default
 
 
+def _num(x, lo, hi, dflt):
+    try:
+        return float(min(hi, max(lo, float(x))))
+    except Exception:
+        return dflt
+
+
+def clean_word(v: Any) -> Optional[str]:
+    """A displayable word or None. The only text the facade may ever show."""
+    if not isinstance(v, str):
+        return None
+    w = re.sub(r"\s+", " ", re.sub(r"[^A-Z!? ]", "", v.upper())).strip()[:7].strip()
+    return w or None
+
+
+def _motion(raw: Any, base: Dict[str, Any]) -> Dict[str, Any]:
+    d = raw if isinstance(raw, dict) else {}
+    return {"kind": d.get("kind") if d.get("kind") in MOTIONS else base["kind"],
+            "speed": _num(d.get("speed"), 0, 1, base["speed"]), "amount": _num(d.get("amount"), 0, 1, base["amount"])}
+
+
+def _particles(raw: Any, base: Dict[str, Any]) -> Dict[str, Any]:
+    d = raw if isinstance(raw, dict) else {}
+    return {"kind": d.get("kind") if d.get("kind") in PARTICLES else base["kind"],
+            "density": _num(d.get("density"), 0, 1, base["density"]),
+            "direction": d.get("direction") if d.get("direction") in ("down", "up") else base["direction"]}
+
+
+def _flash(raw: Any, base: Dict[str, Any]) -> Dict[str, Any]:
+    d = raw if isinstance(raw, dict) else {}
+    return {"kind": d.get("kind") if d.get("kind") in FLASHES else base["kind"], "rate": _num(d.get("rate"), 0, 1, base["rate"])}
+
+
+def _beats(raw: Any, base: Dict[str, Any]) -> List[dict]:
+    """Put the scene in time. A beat names only what changes and inherits the rest.
+
+    Fewer than two usable beats is not a timeline, so it degrades to nothing. Beats are sorted,
+    clamped into 0..1, nudged apart so two never land on one instant, and floored at BEAT_FLOOR
+    so no phase of any scene leaves the tower looking switched off.
+    """
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for b in raw[:MAX_BEATS]:
+        if not isinstance(b, dict):
+            continue
+        out.append({"at": _num(b.get("at"), 0, 1, 0.0),
+                    "label": re.sub(r"\s+", " ", str(b.get("label", "") or ""))[:24].strip(),
+                    "motion": _motion(b.get("motion"), base["motion"]),
+                    "particles": _particles(b.get("particles"), base["particles"]),
+                    "flash": _flash(b.get("flash"), base["flash"]),
+                    "brightness": max(BEAT_FLOOR, _num(b.get("brightness"), 0, 1, 1.0)),
+                    "word": clean_word(b.get("word")) if "word" in b else base["word"]})
+    if len(out) < 2:
+        return []
+    out.sort(key=lambda b: b["at"])
+    out[0]["at"] = 0.0
+    for i in range(1, len(out)):
+        out[i]["at"] = round(min(1.0, max(out[i]["at"], out[i - 1]["at"] + 0.05)), 3)
+    return out
+
+
 def validate(raw: Any) -> Dict[str, Any]:
-    """Coerce anything into a safe, complete spec (never raises)."""
+    """Coerce anything into a safe, complete spec (never raises).
+
+    Rebuilds from known fields only, so foreign keys (``schema_version``, ``_echo``...) are
+    dropped rather than trusted. Idempotent: validate(validate(x)) == validate(x).
+    """
     d = raw if isinstance(raw, dict) else {}
     pal = d.get("palette") if isinstance(d.get("palette"), dict) else {}
-    mo = d.get("motion") if isinstance(d.get("motion"), dict) else {}
-    pa = d.get("particles") if isinstance(d.get("particles"), dict) else {}
-    fl = d.get("flash") if isinstance(d.get("flash"), dict) else {}
     sp = d.get("sprite") if isinstance(d.get("sprite"), dict) else None
     md = d.get("mood") if isinstance(d.get("mood"), dict) else {}
-
-    def num(x, lo, hi, dflt):
-        try:
-            return float(min(hi, max(lo, float(x))))
-        except Exception:
-            return dflt
 
     spec = {
         "ok": bool(d.get("ok", True)),
         "title": str(d.get("title", "?"))[:40],
-        "duration_s": num(d.get("duration_s"), 6, 20, 12),
+        "duration_s": _num(d.get("duration_s"), 6, 20, 12),
         "world": d.get("world") if d.get("world") in WORLD_NAMES else "none",
         "palette": {"base": _hex(pal.get("base"), "#101a2e"), "accent": _hex(pal.get("accent"), "#7cc4ff"), "glow": _hex(pal.get("glow"), "#ffffff")},
-        "motion": {"kind": mo.get("kind") if mo.get("kind") in MOTIONS else "breathe", "speed": num(mo.get("speed"), 0, 1, 0.5), "amount": num(mo.get("amount"), 0, 1, 0.5)},
-        "particles": {"kind": pa.get("kind") if pa.get("kind") in PARTICLES else "none", "density": num(pa.get("density"), 0, 1, 0.5), "direction": pa.get("direction") if pa.get("direction") in ("down", "up") else "down"},
-        "tempo_bpm": num(d.get("tempo_bpm"), 30, 200, 70),
-        "flash": {"kind": fl.get("kind") if fl.get("kind") in FLASHES else "none", "rate": num(fl.get("rate"), 0, 1, 0.3)},
+        "motion": _motion(d.get("motion"), {"kind": "breathe", "speed": 0.5, "amount": 0.5}),
+        "particles": _particles(d.get("particles"), {"kind": "none", "density": 0.5, "direction": "down"}),
+        "tempo_bpm": _num(d.get("tempo_bpm"), 30, 200, 70),
+        "flash": _flash(d.get("flash"), {"kind": "none", "rate": 0.3}),
         "sprite": None,
-        "word": None,
-        "mood": {"valence": num(md.get("valence"), -1, 1, 0.2), "arousal": num(md.get("arousal"), 0, 1, 0.5)},
+        "word": clean_word(d.get("word")),
+        "mood": {"valence": _num(md.get("valence"), -1, 1, 0.2), "arousal": _num(md.get("arousal"), 0, 1, 0.5)},
     }
+    spec["beats"] = _beats(d.get("beats"), spec)
     if sp and isinstance(sp.get("rows"), list):
         rows = [re.sub(r"[^#.]", ".", str(r))[:COLS].ljust(COLS, ".") for r in sp["rows"][:12] if isinstance(r, str)]
         rows = [r for r in rows if len(r) == COLS]
@@ -88,20 +159,20 @@ def validate(raw: Any) -> Dict[str, Any]:
         # legible: not a speck, not a slab (a slab has every row identical or nearly full)
         if rows and 6 <= lit <= int(0.8 * COLS * len(rows)) and len(set(rows)) >= 2:
             spec["sprite"] = {"rows": rows, "anim": sp.get("anim") if sp.get("anim") in SPRITE_ANIMS else "hold", "color": _hex(sp.get("color"), spec["palette"]["glow"])}
-    w = d.get("word")
-    if isinstance(w, str):
-        w = re.sub(r"[^A-Z!? ]", "", w.upper()).strip()[:7]
-        spec["word"] = w or None
     if not spec["ok"]:
-        return SHRUG
+        return dict(SHRUG)
     return spec
 
 
+# What plays when the building will not or cannot depict a phrase: a grey shake and "HMM?".
+# ``ok`` is False so a consumer (the dream composer, the journal) can tell a refusal from a scene;
+# validate() returns it unchanged, so it is a fixed point.
 SHRUG: Dict[str, Any] = {
-    "ok": True, "title": "shrug", "duration_s": 6, "world": "none",
+    "ok": False, "title": "shrug", "duration_s": 6.0, "world": "none",
     "palette": {"base": "#141821", "accent": "#5a6478", "glow": "#9aa4b8"},
-    "motion": {"kind": "shake", "speed": 0.3, "amount": 0.3}, "particles": {"kind": "none", "density": 0, "direction": "down"},
-    "tempo_bpm": 50, "flash": {"kind": "none", "rate": 0}, "sprite": None, "word": "HMM?", "mood": {"valence": 0, "arousal": 0.2},
+    "motion": {"kind": "shake", "speed": 0.3, "amount": 0.3}, "particles": {"kind": "none", "density": 0.0, "direction": "down"},
+    "tempo_bpm": 50.0, "flash": {"kind": "none", "rate": 0.0}, "sprite": None, "word": "HMM?", "mood": {"valence": 0.0, "arousal": 0.2},
+    "beats": [],
 }
 
 
@@ -201,7 +272,12 @@ def warp(px: np.ndarray, kind: str, t: float, phase: float, speed: float, amount
 # ---------------------------------------------------------------------------- performer
 
 class Performance:
-    """One spec being played: layers world → particles → sprite → flash → word, then motion."""
+    """One spec being played: layers world → particles → sprite → flash → word, then motion.
+
+    If the spec carries ``beats``, the active beat overrides motion, particles, flash,
+    brightness and the word for its stretch of the scene, so a dunk is an approach, a leap
+    and an impact rather than a ball with a wobble. Without beats the base fields hold.
+    """
 
     def __init__(self, spec: Dict[str, Any], t0: float, seed: int = 0):
         self.spec = spec
@@ -212,8 +288,11 @@ class Performance:
         self.world_state: Dict = {}
         self.particles = Particles(spec["particles"]["kind"], spec["particles"]["density"], spec["particles"]["direction"], self.accent, self.glow, self.rng)
         self.marquee = Marquee(spec["word"], self.glow, speed=8.0) if spec["word"] else None
+        self.word_shown: Optional[str] = spec["word"]
         # the picture lands first; with a sprite, the word comes at the end so they don't fight for 9 columns
         self.word_delay = 1.2 if not spec["sprite"] else max(2.5, spec["duration_s"] - 6.5)
+        self.beats: List[dict] = list(spec.get("beats") or [])
+        self.bright = self.beats[0]["brightness"] if self.beats else 1.0
         self.flash_t = -10.0
         self.bolt_c = 4.0
         self.done = False
@@ -232,6 +311,14 @@ class Performance:
         """The time the scene is *showing*. Subclasses may stutter or loop it."""
         return t - self.t0
 
+    def beat_at(self, p: float) -> Optional[dict]:
+        """The beat in force at progress ``p`` (0..1), or None when the spec has no beats."""
+        live = None
+        for b in self.beats:
+            if b["at"] <= p:
+                live = b
+        return live
+
     def render(self, t: float, dt: float) -> Canvas:
         self._t = t
         sp = self.spec
@@ -239,6 +326,21 @@ class Performance:
         dur = sp["duration_s"]
         period = 60.0 / sp["tempo_bpm"]
         phase = (e % period) / period
+        # --- the beat in force decides motion / particles / flash / word for this stretch
+        live = self.beat_at(clamp(e / dur)) if self.beats else None
+        motion = live["motion"] if live else sp["motion"]
+        flash = live["flash"] if live else sp["flash"]
+        if live:
+            pk = live["particles"]
+            self.particles.kind, self.particles.density, self.particles.dir = pk["kind"], pk["density"], pk["direction"]
+            target = live["brightness"]
+            self.bright += (target - self.bright) * clamp(dt / BEAT_RAMP_S * 2.5)
+            if live["word"] != self.word_shown:
+                self.word_shown = live["word"]
+                self.marquee = Marquee(live["word"], self.glow, speed=8.0) if live["word"] else None
+            show_word = self.marquee is not None
+        else:
+            show_word = self.marquee is not None and e > self.word_delay
         cv = Canvas()
         # --- world / base
         if sp["world"] != "none":
@@ -266,13 +368,13 @@ class Performance:
             k = 1.0
             if anim == "pulse":
                 k = 0.55 + 0.45 * math.exp(-5 * phase)
-            if self.marquee and e > self.word_delay:
+            if show_word:
                 k *= 0.3  # step back while the word scrolls
             blit_mask(cv, self.sprite, r, 0, self.sprite_rgb, k, "max")
             if anim == "rise":  # exhaust under a rising sprite
                 cv.blob(r + h + 0.5, 4.0, 1.3, self.accent, 0.8 * (0.6 + 0.4 * math.sin(e * 25)), "add")
         # --- flash
-        fk, fr = sp["flash"]["kind"], sp["flash"]["rate"]
+        fk, fr = flash["kind"], flash["rate"]
         if fk != "none":
             if e < 0.25 or (self.rng.random() < dt * (0.15 + 1.2 * fr) and t - self.flash_t > 1.5 and e < dur - 1):
                 if t - self.flash_t > 1.5:
@@ -289,9 +391,12 @@ class Performance:
                     cv.px += 0.35 * k
                     cv.ring(8.0, 4.0, 0.5 + age * 26.0, self.glow, k, thickness=0.9)
         # --- motion
-        cv.px = warp(cv.px, sp["motion"]["kind"], e, phase, sp["motion"]["speed"], sp["motion"]["amount"])
-        # --- word (after a short delay so the picture lands first)
-        if self.marquee and e > self.word_delay:
+        cv.px = warp(cv.px, motion["kind"], e, phase, motion["speed"], motion["amount"])
+        # --- beat brightness (the earned bright moment; floored by validate so it never reads as off)
+        if live:
+            cv.px *= self.bright
+        # --- word (after a short delay so the picture lands first, or when the beat says so)
+        if show_word and self.marquee:
             self.marquee.update(dt)
             cv.px *= 0.65
             self.marquee.draw(cv, 1.0)

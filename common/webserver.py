@@ -9,6 +9,16 @@ GET  /frame       latest frame as JSON {"rows":17,"cols":9,"hex":"..."}
 POST /input       any JSON object -> pushed onto the InputBus (adds "source")
 GET  /<extra>     pages registered with ``add_page(path, html)``
 GET  /api/<name>  JSON handlers registered with ``add_json(path, fn)``
+
+Operator surface
+----------------
+``/input`` is how the simulator page, the phone page and the language service talk to the
+app, so it stays open for ``{"type": "text"}`` (rate limited per client: one prompt every
+GREENDREAM_TEXT_GAP_S seconds, default 10). Every other event type - phase overrides, the
+clock, ``spec`` and ``dream_script`` pushes - changes what the building does without asking
+anyone, so when GREENDREAM_INPUT_TOKEN is set those require the token in an ``X-Input-Token``
+header or a ``?key=`` query parameter. Open ``/?key=TOKEN`` to use the control panel.
+Unset (the default) means open, which is fine on a laptop and not fine behind a tunnel.
 """
 
 from __future__ import annotations
@@ -21,6 +31,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Optional
+from urllib.parse import parse_qs, urlsplit
 
 from .inputs import BUS, InputBus
 
@@ -69,6 +80,29 @@ class ControlServer:
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._sim_html: Optional[str] = None
+        self.input_token: str = os.environ.get("GREENDREAM_INPUT_TOKEN", "").strip()
+        self.text_gap_s: float = float(os.environ.get("GREENDREAM_TEXT_GAP_S", "10") or 0)
+        self._last_text: Dict[str, float] = {}
+
+    # -- input policy -----------------------------------------------------
+    def allow_text(self, client: str, now: Optional[float] = None) -> bool:
+        """One prompt per client per ``text_gap_s``; records the hit when allowed."""
+        if self.text_gap_s <= 0:
+            return True
+        now = time.time() if now is None else now
+        with self._lock:
+            last = self._last_text.get(client, -1e9)
+            if now - last < self.text_gap_s:
+                return False
+            self._last_text[client] = now
+            if len(self._last_text) > 4096:
+                for k in [k for k, v in self._last_text.items() if now - v > self.text_gap_s]:
+                    del self._last_text[k]
+            return True
+
+    def authorized(self, token: Optional[str]) -> bool:
+        """True when no token is configured, or the presented one matches."""
+        return not self.input_token or (token or "") == self.input_token
 
     # -- registration -----------------------------------------------------
     def add_page(self, path: str, html: str) -> None:
@@ -141,10 +175,21 @@ class ControlServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _client(self) -> str:
+                fwd = self.headers.get("X-Forwarded-For", "")
+                return fwd.split(",")[0].strip() if fwd else self.client_address[0]
+
+            def _token(self) -> str:
+                hdr = self.headers.get("X-Input-Token")
+                if hdr:
+                    return hdr.strip()
+                qs = parse_qs(urlsplit(self.path).query)
+                return (qs.get("key") or [""])[0]
+
             def do_OPTIONS(self):
                 self.send_response(204)
                 self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Input-Token")
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -157,6 +202,12 @@ class ControlServer:
                     return self._send(200, facade_js().encode(), "application/javascript")
                 if path == "/frame":
                     return self._send(200, json.dumps({"rows": 17, "cols": 9, "hex": server.latest_hex}).encode(), "application/json")
+                if path == "/healthz":
+                    # The input policy, so an operator can tell from outside whether the building
+                    # is actually locked down. Whether a token is set, never what it is.
+                    return self._send(200, json.dumps({"ok": True, "locked": bool(server.input_token),
+                                                       "text_gap_s": server.text_gap_s,
+                                                       "clients": len(server._clients)}).encode(), "application/json")
                 if path == "/stream":
                     return self._stream()
                 if path in server.pages:
@@ -178,9 +229,15 @@ class ControlServer:
                 except Exception:
                     data = {}
                 if path == "/input":
-                    if isinstance(data, dict):
-                        data.setdefault("source", "web")
-                        server.bus.push(data)
+                    if not isinstance(data, dict) or not data.get("type"):
+                        return self._send(400, b'{"ok":false,"error":"send a JSON object with a type"}', "application/json")
+                    if data.get("type") == "text":
+                        if not server.allow_text(self._client()):
+                            return self._send(429, json.dumps({"ok": False, "error": f"one prompt every {int(server.text_gap_s)} s - give it a moment"}).encode(), "application/json")
+                    elif not server.authorized(self._token()):
+                        return self._send(401, b'{"ok":false,"error":"this event needs the operator token"}', "application/json")
+                    data.setdefault("source", "web")
+                    server.bus.push(data)
                     return self._send(200, b'{"ok":true}', "application/json")
                 if path in server.json_handlers:
                     try:
