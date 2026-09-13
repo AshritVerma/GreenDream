@@ -21,20 +21,24 @@ renders nothing; the pixel side comes later. A day of those scenes becomes one *
 | Cheap preview vs paid submission | `POST /api/preview` |
 | The sprite / no-sprite decision belongs to the model | `app/llm.py::SYSTEM` |
 | Model tier: one forced tool call, cached system prompt (never run against the real API) | `app/llm.py` |
-| Local tier: warm library of 12 scenes, then an affect lexicon (fully offline) | `app/fallback.py` |
+| Local tier: warm library of 33 scenes, then an affect lexicon (fully offline) | `app/fallback.py` |
+| Phrase-first matcher on word boundaries, with negation and capped fuzzy | `app/fallback.py::match` |
 | Spec draft validated and clamped on every path | `app/spec.py::validate` |
 | Day-level arc (quiet open, loud middle, quiet close) | `app/fallback.py::compose_arc`, `GET /api/arc` |
 | Sunset gate with a "the building is dreaming" 423 | `app/sun.py`, `app/gate.py` |
 | Manual kill switch and LLM off switch at runtime | `POST /api/admin/switch` |
 | Blocklist moderation, before any API call | `app/fallback.py::BLOCKLIST` |
-| Per-IP rate limit (gap + hourly cap) | `app/ratelimit.py` |
-| JSONL audit log, one file per day | `app/store.py` |
-| Queue endpoint with a cursor for the pixel side | `GET /api/queue?since=` |
+| Contact details scrubbed before anything is logged | `app/fallback.py::scrub_pii` |
+| Per-IP rate limit (gap + hourly cap), `X-Forwarded-For` only behind a trusted proxy | `app/ratelimit.py`, `GD_TRUST_PROXY` |
+| JSONL audit log, one file per day; review decisions appended, applied on read | `app/store.py` |
+| Queue endpoint with a cursor, refusals filtered out for the pixel side | `GET /api/queue?since=` |
+| Operator review queue: approve or reject a pending row | `GET`+`POST /api/admin/review` |
 | Identical queries served from a disk cache | `app/store.py::cache_get` |
 | Frontend state endpoint (phase, accepting, live view) | `GET /api/state` |
 | Bench page: one query box, word counter, the draft, the arc | `GET /demo` |
 | `gpt-6-astra` wire (written, never run live) | `app/llm.py::_openai` |
-| Push script into a running GreenDream (written, not wired) | `tools/push_to_greendream.py` |
+| Push into a running GreenDream as `spec` events, with the operator token | `tools/push_to_greendream.py` |
+| Proof the two repos agree, scene for scene | `tests/test_alignment.py` |
 
 ## Nothing you type is silently dropped
 
@@ -240,33 +244,35 @@ Trusted to choose a depiction. Not trusted with anything that reaches the window
 
 ## Deliberately open
 
-- **Interpretation and spec both.** We keep both halves until the renderer exists, so the pixel
-  side can be built from either. `schema_version: "spec-v1"` is on every draft; when the
-  renderer disagrees with it, that is the signal to version rather than guess.
-- **Handoff direction.** `GET /api/queue?since=` (pull) is built. `tools/push_to_greendream.py`
-  (push, as `text` events into a running instance) is written but not wired. Once the renderer
-  accepts a finished draft, the push should send the draft and stop making the model answer the
-  same query twice.
-- **Review queue.** Remote queries are stored with `review: "pending"` and `priority: "dream"`;
-  on-site sources (`pedestal`, `onsite`, `qr`, `plaza`) get `priority: "live"`. Nothing consumes
-  those flags yet. That is the asymmetry from the handoff: presence is the price of immediacy,
-  participation is free.
+- **Interpretation and spec both.** We keep both halves, so the pixel side can be built from
+  either. `schema_version: "spec-v1"` is on every draft; `tests/test_alignment.py` proves
+  GreenDream's `scene.validate()` leaves a draft from here unchanged apart from dropping that
+  key, so a disagreement is a test failure rather than a surprise on the building.
+- **The duplicated library is deliberate.** `app/fallback.py` mirrors GreenDream's `library.py`
+  so this service answers without that repo installed. The alignment test compares them field
+  for field; edit one and you must edit the other.
+- **Both directions of the handoff now work.** `GET /api/queue?since=` is the pull;
+  `tools/push_to_greendream.py` is the push, and it sends the finished `spec_draft` as a `spec`
+  event with its tier, channel and priority, so the model is not asked the same query twice.
 - **Live view is a link, not a relay.** `/api/state` hands out a URL. A real relay (proxying the
   runtime's SSE frame stream so the website can draw the facade itself) is a separate job.
 - **Rate limits are per instance**, held in memory. Two instances behind a load balancer would
   each allow the full rate; for one building that is not worth solving.
-- **The blocklist is small on purpose.** Widen it before a public show, and decide then whether
-  remote queries go in unmoderated or through the review flag.
-- **Nothing calls the real API yet.** The Claude path is exercised only by a stubbed tool answer
+- **`GET /api/arc` still returns the queries.** They are scrubbed and moderated by then, and the
+  dream composer writes its notes from them ("a huge thunderstorm came back"), so the text is the
+  useful part. Escaping is therefore the render site's job, and the bench does it in one place.
+- **Nothing calls the real API yet.** The model path is exercised only by a stubbed tool answer
   in the tests. First run with a key: check tier and latency on a handful of queries, and
   confirm the sprite rows come back as exactly 9 characters.
 
-## Backlog, in priority order
+## Backlog
 
 Everything below came out of an end-to-end probe on 13 September 2026: roughly 150 queries plus
 every operational path, run over HTTP against a clean instance with rate limits off and a throwaway
-data directory. Nothing here is fixed yet. Each item gives the evidence, the place that would
-change, and what would prove it fixed.
+data directory.
+
+**Items 1-6 are now fixed** and the record of what was wrong is kept below, because the failures
+are the argument for the tests that now hold them shut. What remains open is in §7.
 
 ### Settled policy: what the building refuses
 
@@ -282,11 +288,11 @@ Two questions the probe forced, now decided:
 If a human support message is ever wanted, the frontend is the place for it: it already knows a
 refusal happened, and it is the only surface that can say something longer than seven characters.
 
-### 1. Safety and the trust boundary
+### 1. Safety and the trust boundary — fixed
 
-The moderation gaps, with the two decisions above now defining the target:
+The moderation gaps, with the two decisions above defining the target:
 
-| query | today | should be |
+| query | was | now |
 |---|---|---|
 | `i want to die` | lexicon `neutral`, word `OK` | blocked shrug |
 | `free palestine`, `trump 2028`, `buy bitcoin now` | lexicon `neutral` | blocked shrug |
@@ -294,61 +300,65 @@ The moderation gaps, with the two decisions above now defining the target:
 | `kill the ref`, `the killer bees` | blocked | allowed; both are innocent |
 | `555 123 4567`, `bob@example.com` | stored verbatim in the day's JSONL | scrubbed before the log |
 
-The false positives and the misses have the same root cause: `is_blocked` matches substrings, so
-"kill" fires inside "killer bees" while a whole category like self-harm has no entry at all. The
-private-person rule exists only in the model's system prompt, which means it disappears in exactly
-the situation the local tier is for — the vendor being down. **Where:** `app/fallback.py::BLOCKLIST`
-and `is_blocked`; PII scrubbing sits between `local_result` and `store.append`. **Check:** the
-five-row table above passes, and no digit run of seven or more survives into a stored `query`.
+The false positives and the misses had the same root cause: `is_blocked` matched substrings, so
+"kill" fired inside "killer bees" while a whole category like self-harm had no entry at all. The
+private-person rule existed only in the model's system prompt, which means it disappeared in
+exactly the situation the local tier is for — the vendor being down.
 
-Separately, and worse, raw user text escapes the trust boundary. `app/main.py:250` returns
-`scenes=[s.query for s in live]`, so `GET /api/arc` hands back the untouched query; the probe got
-`<script>alert(1)</script>`, `<img src=x>`, `555 123 4567` and `i want to die` back out of it. The
-demo page then interpolates that into `innerHTML` at `app/demo.py:463` with no escaping. The scene
-card is careful with its own copy of the query (`app/demo.py:398` escapes `<`), so the arc path is
-an inconsistency rather than a policy: one route escapes, the other does not. Note also that
-`title` and `notes` are model-controlled free text rendered the same way, so they become injectable
-the moment the model tier is switched on. **Where:** `app/main.py::arc` (return validated titles,
-not queries) and every interpolation in `app/demo.py::refreshArc` / `render`. **Check:** submit
-`<img src=x onerror=...>` and then `GET /api/arc` — the response carries no user-supplied text, and
-`#arcout` gains no element node from it.
+**Fixed.** `BLOCKLIST` is now a word-boundary regex organised by category (violence with a target,
+hate, sexual content, self-harm, campaigning, advertising, harassment, profanity), and the violent
+verbs only fire when they have a target, so "kill the lights" is a lighting cue and "kill everyone"
+is not. `scrub_pii` runs inside the request validator, before anything is logged, so emails, links,
+phone numbers and handles never enter the archive. Both repos screen, and
+`tests/test_alignment.py::test_the_blocklist_agrees_on_the_cases_that_matter` fails if they
+disagree; `tests/test_safety.py` holds the category table above.
 
-### 2. Rewrite the matcher lookup — seven bugs, one fix
+The raw-text leak is fixed at the render site rather than by removing data: the bench has one
+`esc()` helper and every interpolation of a query, title, note or message goes through it, checked
+by `test_the_bench_escapes_everything_it_renders`. `GET /api/arc` still returns the queries on
+purpose — see "Deliberately open" above.
 
-`lookup()` matches substrings, in the wrong order, against an index missing half of what it should
-contain. Every row here is the same rewrite:
+### 2. The matcher — fixed (seven bugs, one rewrite)
 
-| query | today | the bug |
+`lookup()` matched substrings, in the wrong order, against an index missing half of what it should
+contain. Every row here was the same rewrite:
+
+| query | was | the bug |
 |---|---|---|
-| `sunset` | the *sunrise* scene, 0% coverage, 0.35 | "sun" matches inside "sunset"; also semantically backwards |
-| `supercalifragilisticexpialidocious` | the *up* scene | "up" matches at index 1 |
-| `snö` | *sunrise* at **0.9** | normalises to "sn", which difflib matches to "sun" |
-| `happy birthday` | *joy*, not the birthday scene | the word pass runs before the phrase pass, so "happy" wins |
-| `its my birthday` | `neutral`, with "birthday" reported unused | library *keys* are not in the per-word index |
-| `the crowd goes wild` | `neutral` | library *keywords* are not in the index either |
-| `thundrstorm`, `snowww` | right scene, punished to 0.35 | coverage counts literal tokens, so a typo reads as unused |
-| `basket ball` | *a dunk* at **0.9** | a fuzzy hit has no confidence ceiling |
+| `sunset` | the *sunrise* scene, 0% coverage, 0.35 | "sun" matched inside "sunset"; also semantically backwards |
+| `supercalifragilisticexpialidocious` | the *up* scene | "up" matched at index 1 |
+| `snö` | *sunrise* at **0.9** | normalised to "sn", which difflib matched to "sun" |
+| `happy birthday` | *joy*, not the birthday scene | the word pass ran before the phrase pass, so "happy" won |
+| `its my birthday` | `neutral`, with "birthday" reported unused | library *keys* were not in the per-word index |
+| `the crowd goes wild` | `neutral` | library *keywords* were not in the index either |
+| `thundrstorm`, `snowww` | right scene, punished to 0.35 | coverage counted literal tokens, so a typo read as unused |
+| `basket ball` | *a dunk* at **0.9** | a fuzzy hit had no confidence ceiling |
 
-**Where:** `app/fallback.py::lookup`, `understood_by`, and the coverage arithmetic in
-`local_result`. **Check:** word-boundary matching only; the phrase pass first with the longest match
-winning; keys and keywords in the index; fuzzy refused below three characters and capped around 0.6
-however good the coverage looks; and `thundrstorm` scoring like the word it obviously meant.
+**Fixed.** `match()` is now: exact key or alias → longest alias phrase on word boundaries → single
+words from an index built from keys, keywords, titles and aliases (a word that could mean two
+scenes is dropped rather than guessed at, and an emotion word loses to a concrete noun in the same
+phrase) → a per-word typo pass → a whole-phrase fuzzy pass. `sunset` is its own scene. A negated
+word never matches. `tests/test_scene.py` and the shared matcher test in `test_alignment.py` cover
+the table; `test_a_bare_substring_is_not_a_match` is specifically the "supper" → *up* bug.
 
-### 3. Negation in the affect lexicon
+### 3. Negation in the affect lexicon — fixed
 
-`i'm not sad` returns the sad scene with the word `AWW`. `not happy at all` returns the joy scene.
-Nothing reads "not", "never" or "no" — they are just unmatched tokens, so the sentiment lands
-exactly backwards. **Where:** `app/fallback.py::lexicon_affect` (and the alias pass, since "not
-happy" currently reaches a library scene). **Check:** `i'm not sad` and `not happy at all` both come
-back with valence on the other side of zero from their un-negated forms.
+`i'm not sad` returned the sad scene with the word `AWW`; `not happy at all` returned the joy
+scene. Nothing read "not", "never" or "no" — they were just unmatched tokens, so the sentiment
+landed exactly backwards.
 
-### 4. Library breadth
+**Fixed.** `lexicon_affect` looks two words back for a negator and flips the valence and the
+emotion through an `OPPOSITE` table; the matcher refuses a negated word, so "not snow" no longer
+reaches the snow scene either. Both repos share the behaviour, checked by
+`test_the_lexicon_agrees_on_mood`.
+
+### 4. Library breadth — fixed
 
 Of 59 realistic queries, **36 (61%) came back as `neutral` with the word `OK`**, and **48 (81%)
-scored recognizability at or below 0.35**. Thirteen reached the warm library. Twelve scenes are
+scored recognizability at or below 0.35**. Thirteen reached the warm library. Twelve scenes were
 carrying a whole city.
 
-The misses are not exotic — they are the first things anyone would type:
+The misses were not exotic — they are the first things anyone would type:
 
 - **Local sport and place:** `go sox`, `celtics in 7`, `bruins goal`, `beat harvard`, `the green
   line`, `the T is late`, `charles river`
@@ -358,41 +368,57 @@ The misses are not exotic — they are the first things anyone would type:
   `a tree`, `an umbrella`, `the northern lights`
 - **Open invitations:** `surprise me`, `anything`, `show me something`
 
-`OK` also needs to stop being the default text. "The building shrugs politely" is currently the
-single most common thing it says, and `OK` on nine windows is the least interesting two letters
-available. **Where:** `app/fallback.py::LIBRARY`, `ALIASES`, `BEATS`, and `EMOTION_WORD`.
-**Check:** rerun the same 59 queries and have fewer than 20% land on `neutral`, with no scene
-answering more than about a fifth of them.
+`OK` also needed to stop being the default text. "The building shrugs politely" was the single most
+common thing it said, and `OK` on nine windows is the least interesting two letters available.
 
-### 5. The queue contract
+**Fixed.** The library is 33 scenes with 17 of them choreographed, covering every bullet above,
+and the aliases grew with it. `EMOTION_WORD["neutral"]` is now `None`: a mood the building cannot
+name is a colour, not a sign. Every advertised key is reachable by saying it
+(`test_every_advertised_scene_is_reachable`) and so is every alias.
 
-Two loose ends where the pixel side would get this wrong through no fault of its own. Blocked
-submissions are stored and served by `GET /api/queue` with `ok: false` and the refused text kept
-verbatim, and nothing in the contract says a consumer must filter them — the probe's day log held
-four such rows. Relatedly, `app/main.py:251` composes the arc over the *unfiltered* list, so
-shrugs colour the night even though `count` and `scenes` filter on `ok`. And `review: "pending"` is
-write-only: every row the probe produced carried it, and there is no endpoint that can move a row
-to approved, so a careful consumer would correctly draw nothing at all. **Where:**
-`app/main.py::queue` and `::arc`, plus whatever approves a row. **Check:** `/api/queue` either
-omits `ok: false` rows or documents the filter, the arc is composed only over `live`, and one call
-can approve a pending row.
+### 5. The queue contract — fixed
 
-### 6. Operational polish
+Two loose ends where the pixel side would have got this wrong through no fault of its own. Blocked
+submissions were stored and served by `GET /api/queue` with `ok: false` and the refused text kept
+verbatim, and nothing in the contract said a consumer must filter them. The arc was composed over
+the *unfiltered* list, so shrugs coloured the night. And `review: "pending"` was write-only: there
+was no endpoint that could move a row to approved, so a careful consumer would correctly have drawn
+nothing at all.
 
-- **Preview limits are hardcoded and undiscoverable.** `PREVIEW_SECONDS = 2.0` and
-  `PREVIEW_PER_HOUR = 120` are module constants in `app/main.py`; four rapid previews all returned
-  429 on an instance with rate limits explicitly turned off. Type-ahead preview cannot work against
-  that, and `/api/state` publishes `max_words` and `max_chars` but no rate limits, so a frontend
-  cannot even pace itself. **Check:** both limits configurable, and a frontend can read them.
-- **`/api/library` over-promises.** It advertises twelve scenes including `birthday` and
-  `my heart is racing`, several of which the matcher cannot reach through natural phrasing (see
-  item 2). **Check:** every advertised key is reachable by at least one sentence a person would say.
-- **Some scenes open too dark to read as alive.** `sunrise` sits at brightness 0.15 for its first
-  **4.8 seconds**; `thunderstorm` opens at 0.35 for 4.2 s and `take me to space` at 0.35 for 3.6 s
-  (its title is `hyperspace`, which is what the probe logged). Earning the bright
-  moment is right, but from the street a near-black tower reads as broken, and it is the first thing
-  a passer-by sees. **Where:** `app/fallback.py::BEATS`, possibly a floor in `spec.validate()`.
-  **Check:** no scene spends more than about two seconds below 0.3, and no first beat opens there.
+**Fixed.** `/api/queue` filters refusals and rejected rows by default (`?include_refused=true`
+returns them), and the cursor still advances past what it filtered, so a skipped row is not retried
+forever. The arc skips rejected rows. `GET`/`POST /api/admin/review` list and decide pending rows;
+because the log is append-only, a decision is written as its own line and applied when the day is
+read, so nothing is ever rewritten and "we said no to this" is kept too.
+
+### 6. Operational polish — fixed
+
+- **Preview limits were hardcoded and undiscoverable.** Four rapid previews all returned 429 on an
+  instance with rate limits explicitly turned off. Now `GD_PREVIEW_RATE_SECONDS` and
+  `GD_PREVIEW_PER_HOUR`, and previews sit behind `GD_INGEST_TOKEN` as well — a preview is a model
+  call, so an open preview endpoint is an open API budget.
+- **`/api/library` over-promised**, advertising scenes the matcher could not reach through natural
+  phrasing. Now tested: every key and every alias reaches its scene.
+- **Some scenes opened too dark to read as alive.** `sunrise` sat at brightness 0.15 for its first
+  4.8 seconds. Earning the bright moment is right, but from the street a near-black tower reads as
+  broken, and it is the first thing a passer-by sees. `spec.validate()` now floors every beat at
+  `BEAT_FLOOR = 0.3`, on both sides, so no model or library entry can ask for less.
+- **`X-Forwarded-For` was believed unconditionally**, so anyone could mint a fresh identity per
+  request with one header. Now only trusted when `GD_TRUST_PROXY` says there is a proxy in front.
+
+### 7. Still open
+
+- **Nothing has run against a real API key.** Items 2-4 were fallback-quality problems that the
+  model tier would largely have masked; the model path itself is still only exercised by a stubbed
+  tool answer. First run with a key: check tier and latency on a handful of queries, and confirm
+  the sprite rows come back as exactly 9 characters.
+- **`/api/state` does not publish the rate limits**, so a frontend cannot pace itself; it gets a
+  429 and has to guess. `max_words` and `max_chars` are published, these should be too.
+- **The golden set.** 40 phrases rated 1-5 for "would a stranger recognise it", promoting 4+ into
+  the library. That is the only way to know whether the 33 scenes are the right 33.
+- **Review before dusk is manual.** There is an endpoint and a list, but no page; an operator
+  works through it with curl. A small admin page would take an hour and would be used on the night.
+- **Rate limits and caches are per instance**, in memory. Fine for one building.
 
 ### What the probe confirmed working
 
@@ -406,6 +432,40 @@ word is a `422` with a usable message, empty input is rejected, and `<script>`, 
 and CJK cannot reach the facade because `word` is clamped to A-Z, `!` and `?`.
 
 One caveat over all of the quality findings: there is no API key on this machine, so every result
-came from the local tier. Items 2, 3 and 4 are fallback-quality problems that the model tier would
-largely mask. Items 1 and 5 are not masked at all — moderation runs *before* any model call, and
-the raw-text leak is in the arc and the demo page, where no model is involved.
+came from the local tier. Items 2, 3 and 4 were fallback-quality problems that the model tier would
+largely have masked. Items 1 and 5 were not masked at all — moderation runs *before* any model
+call, and the raw-text leak was in the arc and the demo page, where no model is involved.
+
+### The end-to-end run, 13 September 2026
+
+After the fixes, all three processes were run together against a clean data directory and driven
+over HTTP: the service on `:8100`, GreenDream on `:8001` with an operator token, and `render.py` on
+`:8110` in `--ingest` mode. What it confirmed:
+
+- A phrase typed at the preview is interpreted by the service and rendered here — one reading of
+  the words, not two. `not snow` and `supper` both correctly fall through to a mood rather than
+  reaching the snow and *up* scenes.
+- On-site sources perform live; remote ones are stored as `dream` and wait for review.
+- `kill everyone` is refused, filtered out of the queue, and still present in the log.
+- `email me at bob@example.com` is stored, and reaches GreenDream's journal, as
+  `email me at someone`.
+- `push_to_greendream.py` without the operator token gets a 401 and says which variable to set;
+  with it, five drafts arrive as `spec` events and appear in `/api/journal` with their channel,
+  tier and priority.
+- Forced to dusk, the runner composed a seven-act dream out of that day's real material and played
+  it, recoloured and inverted, on the facade.
+
+The run found one bug worth its own note. **The pusher advanced its cursor past rows it had not
+sent.** On a 401 it stopped sending — correctly — and then returned the page's cursor anyway, so
+every row after the refused one was skipped for good. In daemon mode that is silent data loss of
+exactly the material the piece is made of: the queue is the only copy of what somebody typed.
+The cursor now only moves past rows that were actually dealt with, a dead runner stops the drain
+rather than burning the page, and a row the runner rejects on its own merits is stepped over so
+one bad draft cannot wedge the queue behind it. `tests/test_push.py` (12 tests) pins all three
+against fakes; the one that matters is "fix the token, run again, and the rows still arrive".
+
+A second pass, with the fix in and frames recorded, confirmed the pixels rather than just the
+JSON: the tower holds its warm idle glow, cuts to the storm — cold blue-grey across all 153
+windows — and later to the fireflies drifting gold, which is the same order the journal claims.
+The journal line now also carries `world` and `word`, so it can answer what the building actually
+showed rather than only what it was asked.

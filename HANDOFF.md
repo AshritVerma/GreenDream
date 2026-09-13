@@ -25,7 +25,8 @@ Owner: Ashrit Verma (contactashrit@gmail.com, GitHub `AshritVerma`). Project is 
 
 ## 1. Status — what exists and is verified
 
-Everything below runs offline (no API key) and is covered by `tests/test_app.py` (3 tests, pass).
+Everything below runs offline (no API key) and is covered by `tests/` (81 tests, pass). The
+language half lives in a **separate repo**, `greendream-llm` (137 tests) — see §2.1.
 
 | area | state | where |
 |---|---|---|
@@ -40,9 +41,13 @@ Everything below runs offline (no API key) and is covered by `tests/test_app.py`
 | Hosted hack simulator backend (`--display sundai:INSTANCE`) + clip upload helper | done, verified against the live instance | `common/displays.py::SundaiDisplay`, `common/sundai.py` |
 | Recording backend + demo.html generator + GIF | done | `common/displays.py::RecordingDisplay`, `tools/` in the parent workspace |
 | Compressed-day demo (`--demo`): dawn, 8 prompts, dusk, one full dream, dawn | done, recorded (`demo/recording.json`, `demo.html`) | `app.py::demo_script` |
+| Scene **beats**: a scene is an event in time (approach → leap → lands → crowd), not one held picture | done | `scene.py` (`_beats`, `Performance.beat_at`), `library.py::BEATS` |
+| Operator auth on `/input` + server-side prompt rate limit + `/healthz` | done | `common/webserver.py` |
+| Every incoming `spec` event re-validated at the boundary; `live` vs `dream` priority | done | `app.py::on_event` |
+| Preview service (`render.py` on :8110) + `--ingest` so the preview uses the service's reading | done | `render.py`, `web/preview.html` |
 
 **Not built yet** (see §8): speech-to-text at the building (push-to-talk mic), SMS/iMessage
-channel, camera-gated "listening", morning recap, cross-day memory, operator auth, deployment
+channel, camera-gated "listening", morning recap, cross-day memory, deployment
 service files, load testing, the golden-set evaluation loop.
 
 **Never run with a real API key.** `genie.claude_spec()` and `dream.compose_claude()` are
@@ -59,25 +64,34 @@ greendream/
   app.py             GreenDream(App): phases, day performer, night cycles, journal, controls   (393 lines)
   dream.py           DreamScript schema + composers + dream ops + DreamScene/DreamPlayer         (340)
   genie.py           text -> spec: BLOCKLIST, library lookup, claude_spec(), lexicon_spec(), request_async()  (109)
-  library.py         reference specs (also the model's few-shots), ALIASES, normalize(), lookup()  (97)
-  scene.py           SCHEMA, validate(), SHRUG, Particles, warp(), Performance                    (299)
+  library.py         the warm library: ENTRIES + BEATS + ALIASES, indexed phrase-first match(), lookup()
+  scene.py           SCHEMA (incl. beats), validate(), SHRUG, clean_word(), Particles, warp(), Performance
   worlds.py          9 background worlds + mix() transitions (copied from greenhack6)             (251)
   pages.py           SAY_PAGE, JOURNAL_PAGE (self-contained HTML strings)                          (70)
+  render.py          separate service on :8110 — POST /digest (text -> spec -> clip), POST /render (spec -> clip);
+                     --ingest URL interprets through the language service so preview == performance
+  web/preview.html   the page render.py serves: type a phrase, watch the clip before committing to it
+  FEATURES.md        canonical feature list + backlog for the language service (greendream-llm)
   common/            shared runtime — identical across all greenhack repos; treat as a library
     canvas.py        Canvas (17x9x3 float32), blobs/lines/rings/gradients, ValueNoise, fonts, Marquee, blit_mask
     engine.py        App base class, Context, build_parser(), run() 30 fps loop, main(), --gentle limiter
     displays.py      web | pygame | record:PATH | sundai:INSTANCE | udp:HOST:PORT | http:URL | null | file.py:Class, chain with +
-    webserver.py     ControlServer: stdlib HTTP + SSE; /, /stream, /frame, POST /input, add_page(), add_json()
+    webserver.py     ControlServer: stdlib HTTP + SSE; /, /stream, /frame, /healthz, POST /input, add_page(), add_json()
+                     /input policy: a `text` event is open but rate limited per IP (GREENDREAM_TEXT_GAP_S,
+                     default 10 s); every other event type needs GREENDREAM_INPUT_TOKEN in X-Input-Token
+                     or ?key=, because those drive the building. /healthz reports whether it is locked.
     inputs.py        InputBus (thread-safe deque, BUS singleton), Timeline (scripted demo events)
     sundai.py        upload_clip() / clear_clip() / status() for the hosted simulator (simulator-only)
     web/facade.js    the Green Building renderer used by the simulator page and demo.html
     web/sim.html     the simulator page (placeholders __TITLE__/__DESC__, /*FACADE_JS*/ inlined at serve time)
   sensors/
-    llm.py           lexicon_affect() (used by genie.lexicon_spec); claude_affect()/affect_async() are legacy from greenhack5
+    llm.py           lexicon_affect() with negation handling + EMOTION_WORD (used by genie.lexicon_spec)
     weather.py       WeatherSensor thread -> {"type":"weather", sunrise, sunset, temp_c, ...}; cache file weather_cache.json
   utilities/         UPSTREAM, untouched: display.py (Color, Frame, Display), dummy.py (pygame DummyDisplay), input_manager.py
   tetris.py          UPSTREAM, untouched
-  tests/test_app.py  smoke tests (headless run, lights up, valid bytes, keeps 30 fps)
+  tests/             test_app.py (headless run, lights up, valid bytes, keeps 30 fps), test_scene.py
+                     (beats, validate, the matcher), test_input.py (the /input gate, spec events),
+                     test_render.py (digest, clips, cache, budget) — 81 in all
   demo/              recording.json (15 fps) + preview.gif of the scripted demo
   demo.html          write-up with an interactive replay (open the file directly)
   tools/make_cert.sh self-signed cert for https (phone camera/motion APIs); not needed for /say
@@ -87,6 +101,67 @@ greendream/
 Upstream is `github.com/Nevin-Thinagar/17x9-Tetris` (git remote `upstream`, full history kept).
 The only contract the real building offers: `utilities/display.py` — `Frame` (numpy object array
 of `Color`, row 0 = top) and `Display.send(frame)` at ≤ 30 calls/s. Everything we built sits on it.
+
+### 2.1 The other half: `greendream-llm`
+
+The project is two repos. This one owns **pixels**; `../greendream-llm` (FastAPI, `:8100`) owns
+**words**. Neither imports the other — they meet over HTTP — and that split is deliberate: the
+thing driving 153 windows should not be the thing facing the public internet.
+
+```
+greendream-llm/
+  app/main.py      the API: POST /api/ingest, POST /api/preview, GET /api/state, GET /api/queue,
+                   GET /api/arc, POST /api/admin/switch, GET+POST /api/admin/review
+  app/llm.py       the model tier (OpenAI or Anthropic, tool use); app/fallback.py the local tier
+  app/fallback.py  the warm library (mirrored from library.py), the matcher, BLOCKLIST, scrub_pii,
+                   lexicon_affect, compose_arc
+  app/spec.py      the same scene schema and validate() as scene.py, minus the renderer
+  app/store.py     append-only JSONL per day; review decisions are appended and applied on read
+  tools/push_to_greendream.py   drains GET /api/queue into this repo's POST /input as `spec` events
+  tests/test_alignment.py       imports this repo's library.py/scene.py and proves the two agree
+  tests/test_push.py            the pusher's cursor, against fakes: what happens to a row it could
+                                not send
+```
+
+**The duplication is load-bearing and it is tested.** `app/fallback.py` mirrors `library.py`
+(entries, beats, aliases, matcher) and `app/spec.py` mirrors `scene.py`'s schema, so that the
+service can answer without this repo installed. `tests/test_alignment.py` over there fails if
+they drift — it checks the scenes field-for-field, that both matchers agree on real phrases, and
+that a draft made there survives `scene.validate()` here unchanged. Change a scene in one file
+and you must change it in the other.
+
+Running all three (each in its own terminal):
+
+```bash
+# words, on :8100
+cd ../greendream-llm && GD_GATE=open uvicorn app.main:app --port 8100
+# pixels, on :8000 — the token makes every non-prompt event need X-Input-Token
+cd ../GreenDream && GREENDREAM_INPUT_TOKEN=secret python main.py --open
+# preview, on :8110 — interprets through the service, so preview == performance
+GD_INGEST_TOKEN=svc python render.py --ingest http://localhost:8100
+# hand accepted scenes to the building
+cd ../greendream-llm && GREENDREAM_INPUT_TOKEN=secret python tools/push_to_greendream.py \
+    --api http://localhost:8100 --target http://localhost:8000 --api-token svc
+```
+
+Two different tokens, and it is worth keeping them straight: `GREENDREAM_INPUT_TOKEN` is the
+runner's, and `GD_INGEST_TOKEN` is the service's. The pusher needs both, one for each end.
+`render.py --ingest` needs the service's, so it reads `GD_INGEST_TOKEN` too rather than inventing
+a third name for the same secret.
+
+The pusher holds a cursor into the queue and only advances it past rows it actually dealt with.
+If the runner refuses one (no token, or it is down), it stops there and leaves the cursor before
+that row, so fixing the problem and running again sends it. Nothing in the queue is retried
+forever either: a row the runner rejects on its own merits is stepped over. `--once` exits
+non-zero if the page did not go through, which is what a cron wrapper should watch.
+
+Verified end to end on 2026-09-13: a phrase previewed on :8110 is interpreted by :8100, the same
+draft is pushed to :8000 as a `spec` event, appears in `/api/journal` with its channel, tier,
+`live`/`dream` priority and the word it put on the facade, and at dusk is composed into a dream.
+A blocked phrase is refused, kept in the log, and never handed to the pixel side; a phone number
+in a prompt is scrubbed before it is ever written down; a push without the token is refused with
+401 and loses nothing. Recorded frames confirm the pixels: warm idle, then the storm, then the
+fireflies.
 
 ---
 
@@ -112,6 +187,11 @@ Environment variables:
 | `ANTHROPIC_MODEL_DREAM` | model for dream scripts, default `claude-sonnet-4-5` |
 | `PORT` | default web port (8000) |
 | `SUNDAI_INSTANCE` | default instance for `--display sundai:` when no name is given |
+| `GREENDREAM_INPUT_TOKEN` | required in `X-Input-Token` (or `?key=`) for every `/input` event except a prompt. Unset = open, which is right on a laptop and wrong on a tunnel. Check with `GET /healthz`. |
+| `GREENDREAM_TEXT_GAP_S` | minimum seconds between prompts from one IP, default 10; `0` disables |
+| `GREENDREAM_INGEST_URL` | `render.py` default for `--ingest` |
+| `GD_INGEST_TOKEN` | the **language service's** token, sent by `render.py --ingest` and by the pusher's `--api-token`. Deliberately the service's own name for it rather than a third alias. |
+| `GREENDREAM_DAILY_MODEL_CALLS` / `GREENDREAM_IP_PER_MINUTE` | `render.py` budget, default 400/day and 12/min |
 
 CLI flags (all in `common/engine.py::build_parser` unless noted): `--display`, `--port`, `--fps`,
 `--duration`, `--frames`, `--demo`, `--open`, `--seed`, `--gif`, `--stats`, `--gentle`,
@@ -132,7 +212,10 @@ every frame; never sleep or block inside the app — all I/O is on threads that 
 `GET /frame` current frame JSON · `POST /input` any JSON → `BUS.push()` with `source` defaulted
 to `"web"` · pages registered with `ctx.add_page(path, html)` · JSON handlers with
 `ctx.server.add_json(path, fn(method, body) -> dict)`. GreenDream registers `/say`, `/journal`,
-`/api/journal`. No auth anywhere (see §8.6).
+`/api/journal`, and `/healthz`, which reports the input policy (locked or not, the text gap,
+connected clients) without echoing the token. A `text` event is open but rate limited per IP;
+every other event type needs `GREENDREAM_INPUT_TOKEN` in `X-Input-Token` or `?key=`. The
+simulator page itself is still unauthenticated — see §8.6.
 
 ---
 
@@ -208,7 +291,8 @@ flash → `warp()` motion → word; sets `.done` at `duration_s`. Transitions be
   tempo × 0.6, word removed, plus per-op changes; `_echo/_fragment/_storm_of/_merge/_loop` private keys).
 - `DreamScene(Performance)` renders the private-key ops on top: merge = cross-fade with the partner's
   sprite every ~2 s; echo = half-size copies in two corners; fragment = the sprite's pixels peel off
-  as sparks while it fades; storm-of = tiny copies rain through; loop = no-op today.
+  as sparks while it fades; storm-of = tiny copies rain through; loop = the scene's clock is taken
+  modulo `LOOP_S`, so its motion phase restarts every few seconds until `duration_s` is reached.
 - `DreamPlayer(script, day, t0, seed)` plays scenes in order with 1.6 s transitions; `render(t, dt, depth)`
   applies the dream filter (70 % colour + indigo cast, 8 s breath, REM flutter, 0.55–0.9 brightness)
   and climbs the title marquee during the first 6 s. `.done` when the script ends.
@@ -230,7 +314,10 @@ DAWN `[sunrise − w/2, sunrise + w/2)`, DUSK likewise around sunset, DAY betwee
 
 ### Journal
 
-`journal/YYYY-MM-DD.jsonl` — one line per prompt: `{when, text, channel, ts, title}` (spec omitted).
+`journal/YYYY-MM-DD.jsonl` — one line per prompt:
+`{when, text, channel, priority, tier, latency_ms, ts, title, ok, world, word}` (the spec itself is
+omitted; `world` and `word` are kept because they are what the building actually showed, and `word`
+is the only text the facade ever displays).
 `journal/YYYY-MM-DD.dreams.jsonl` — one line per dream script: `{cycle, tier, script, ts}`.
 `GET /api/journal` → `{phase, hour, sunrise, sunset, prompts[], dreams[], now}` (in-memory, today only).
 
@@ -289,7 +376,7 @@ DAWN `[sunrise − w/2, sunrise + w/2)`, DUSK likewise around sunset, DAY betwee
 
 1. **The model never draws pixels.** It fills the scene spec; legibility comes from the vocabulary, not from
    prompt engineering. Any new visual capability is a new spec field + renderer support + validator rule.
-2. **Always answer.** Three tiers (library → Claude → lexicon) with a hard 4 s ceiling before the fallback;
+2. **Always answer.** Three tiers (library → Claude → lexicon) with a hard 6 s ceiling before the fallback;
    the "thinking" shimmer starts the instant a prompt arrives so perceived latency is zero.
 3. **Raw user text never reaches the facade.** Only the validated `word` (A–Z ! ?, ≤ 7) is ever displayed.
 4. **Night is the show; day is the collecting phase.** In daylight the real windows read faintly at best;
@@ -335,12 +422,10 @@ DAWN `[sunrise − w/2, sunrise + w/2)`, DUSK likewise around sunset, DAY betwee
   iMessage via a Mac (`chat.db` polling or an AppleScript bridge) is possible but fragile — treat as bonus.
 - On-site: push-to-talk pedestal — `faster-whisper` (base, int8) on the laptop, arcade button as a USB HID
   key, transcript posted as `{"type":"text","source":"pedestal"}`; pedestal screen shows the transcript.
-- Composer weighting: on-site sources get opening/closing placement; remote ones fill the middle.
-  Implement in `compose_offline` and in `DREAM_SYSTEM` (mention channels in the listing).
-- Rate limits server-side (per source/IP, e.g. 1 per 10 s) — today only the `/say` page limits client-side.
+- Composer weighting in `DREAM_SYSTEM` (mention channels in the listing) — `compose_offline` already
+  gives on-site prompts the opening and closing placement.
 
 ### 8.4 Dream engine v2
-- `loop` op is a no-op — implement (restart the scene's motion phase every ~3 s).
 - A morning recap on `/journal`: last night's dreams with a GIF (use `RecordingDisplay.save_gif` on the
   night's frames, or render each script offline).
 - Optional cross-day memory: seed tonight's `day` with the 2–3 most recurring titles from previous journals.
@@ -351,12 +436,25 @@ DAWN `[sunrise − w/2, sunrise + w/2)`, DUSK likewise around sunset, DAY betwee
 - Add a "GOOD NIGHT" marquee at the start of DUSK to mirror GOOD MORNING (currently only the yawn).
 
 ### 8.6 Safety and operations
-- Extend `genie.BLOCKLIST`; add an operator-approval queue for remote prompts (flag in the day entry;
-  the composer skips unapproved ones) if the team decides remote goes in unmoderated otherwise.
-- Protect the operator surface: the simulator page `/` and `/input` events other than `text` should
-  require a token when exposed through the tunnel (simplest: a `?key=` check in `ControlServer`).
-- Kill switch (`phase → night`/`skip` exist; add `freeze` = black frame) and a written content policy.
-- Logging: every prompt already goes to the journal; add tier/latency to the JSONL line.
+
+Done, and the reason each is listed here rather than deleted is that the remaining items depend
+on them: `BLOCKLIST` covers hate, violence, self-harm, campaigning, advertising and personal
+harassment on word boundaries (mirrored in both repos, and `test_alignment.py` fails if the two
+disagree); PII is scrubbed before a prompt is written down; remote submissions land as `pending`
+and an operator works through `GET/POST /api/admin/review` before they can be pushed; `/input`
+takes a token for everything except a prompt, and prompts are rate limited per IP; the journal
+line carries tier and latency.
+
+Still open:
+- **A written content policy.** The blocklist is the implementation of a policy nobody has
+  written down, which means only the person who wrote the regex knows where the line is.
+- **A `freeze` event** (black frame, hold) as a kill switch that does not require a redeploy.
+  `phase → night` and `skip` exist but neither is "stop showing anything, now".
+- **The simulator page `/` is still unauthenticated.** Anyone with the tunnel URL can watch, which
+  is fine, and can also use the control panel, which is not — the panel's build-driving buttons
+  need `?key=`, so they fail closed, but the page should not be offering them at all.
+- **Nothing rotates the tokens**, and they are passed on the command line, where they show up in
+  `ps`. For a week-long unattended run they belong in an environment file with mode 600.
 
 ### 8.7 Sept 29 specifics
 - Calibration pattern (numbered rows, moving corner dot) as `--display` sanity check on the real driver.

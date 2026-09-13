@@ -63,13 +63,15 @@ The only contract is `utilities/display.py` (`Frame`, `Color`, `Display.send`). 
 | `app.py` | GreenDream: phases, day performer, dawn/dusk choreography, night cycles, journal |
 | `dream.py` | dream script schema, Claude + offline composers, dream ops, DreamScene/DreamPlayer |
 | `pages.py` | /say and /journal phone pages |
-| `scene.py` | scene spec, validator, particles, motion, Performance |
+| `scene.py` | scene spec (incl. beats), validator, particles, motion, Performance |
 | `genie.py` | text → spec (library / Claude / lexicon) |
-| `library.py` | reference specs + aliases |
+| `library.py` | the warm library: scenes, their beats, aliases, the matcher |
+| `render.py` | preview service on :8110: a phrase or a spec becomes a clip a browser can play |
 | `worlds.py` | background worlds + transitions |
 | `main.py` | entry point |
 | `common/` | shared runtime: canvas & effects, 30 FPS loop, display back-ends, browser simulator (`common/web/`) |
-| `tests/` | headless smoke tests |
+| `tests/` | headless smoke tests, the scene contract, the input gate, the digest path |
+| `FEATURES.md` | the language service (`../greendream-llm`): what it does and what is left |
 | `demo/` | `recording.json` + `preview.gif` of the scripted demo |
 | `utilities/`, `tetris.py` | the upstream Tetris repo, untouched |
 
