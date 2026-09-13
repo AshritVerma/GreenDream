@@ -6,9 +6,10 @@
     GET  /api/queue?since=   what the pixel side reads: accepted scenes, oldest first.
     GET  /api/arc            the day's scenes read as one story, to seed tonight's dream.
     POST /api/admin/switch   the off switches: the model tier and the intake gate.
-    GET  /api/admin/review   what is waiting for a person to look at it.
+    GET  /api/admin/review   what is waiting for a person to look at it, and what was decided.
     POST /api/admin/review   approve or reject one submission.
     GET  /api/health         liveness.
+    GET  /admin              the operator's review page, behind the same admin token.
 
 No pixels are rendered here. The service stops at a validated draft; GreenDream's
 `render.py` is the only thing that turns one into light.
@@ -26,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import fallback, gate, llm, ratelimit, store, sun
+from .admin import ADMIN_PAGE
 from .demo import DEMO_PAGE
 from .config import settings
 from .models import (ArcResponse, GateInfo, IngestRequest, IngestResponse, ReviewRequest,
@@ -122,6 +124,7 @@ def index() -> Dict[str, Any]:
                       "GET /api/arc", "POST /api/admin/switch", "GET /api/admin/review",
                       "POST /api/admin/review", "GET /api/health"],
         "demo": "/demo",
+        "admin": "/admin",
         "docs": "/docs",
     }
 
@@ -130,6 +133,13 @@ def index() -> Dict[str, Any]:
 def demo() -> str:
     """A bench for trying the API by hand. Not the product frontend."""
     return DEMO_PAGE
+
+
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+def admin() -> str:
+    """The review page. A shell with no data in it: it asks for the admin token and every
+    call it makes carries it, so there is nothing here to read without one."""
+    return ADMIN_PAGE
 
 
 @app.get("/api/health")
@@ -303,20 +313,66 @@ def switch(req: SwitchRequest) -> Dict[str, Any]:
             "message": g["message"]}
 
 
+def _review_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """One stored submission as much of itself as a person needs to judge it.
+
+    The decision being asked for is "would I put this on the side of a building", so the row
+    carries the query, what the building would become, and how much of the query it actually
+    understood. `coverage`, `unused_words` and `match` are the honest part: a canned scene
+    unlocked by one word out of four is the case where an operator should look twice, and
+    without those three fields the row would not say so.
+    """
+    result = row.get("result") or {}
+    it = result.get("interpretation") or {}
+    draft = result.get("spec_draft") or {}
+    return {
+        "id": row.get("id"), "seq": row.get("seq"), "received_at": row.get("received_at"),
+        "channel": row.get("channel"), "tier": row.get("tier"), "priority": row.get("priority"),
+        "review": row.get("review", "pending"),
+        "query": result.get("query"), "ok": result.get("ok", True),
+        "match": result.get("match", ""), "coverage": result.get("coverage"),
+        "unused_words": result.get("unused_words") or [],
+        "title": it.get("title") or draft.get("title"),
+        "theme": it.get("theme", ""), "keywords": it.get("keywords") or [],
+        "notes": it.get("notes", ""), "recognizability": it.get("recognizability"),
+        "mood": it.get("mood") or {},
+        "world": draft.get("world"), "word": draft.get("word"),
+        "duration_s": draft.get("duration_s"), "palette": draft.get("palette") or {},
+        "beats": [b.get("label", "") for b in (draft.get("beats") or [])],
+    }
+
+
 @app.get("/api/admin/review", dependencies=[Depends(require_admin_token)])
-def review_queue(limit: int = Query(100, ge=1, le=500)) -> Dict[str, Any]:
-    """What is waiting for a person to look at it, newest last.
+def review_queue(limit: int = Query(100, ge=1, le=500),
+                 state: str = Query("pending", pattern="^(pending|approved|rejected|decided|all)$")
+                 ) -> Dict[str, Any]:
+    """What is waiting for a person to look at it, and what was already decided. Newest last.
 
     Remote submissions land as ``pending``: they are dream material, and nobody watched them
     being typed. This is the list an operator works through before the sun goes down.
+
+    ``state`` exists because an operator who has just refused something wants to see that it
+    is refused, and occasionally to take it back. On-site rows are ``auto`` — nobody has to
+    approve a prompt that was typed at the building — so they appear only under ``all``.
+    ``rows`` is the list; ``pending`` is the same list under its original name, kept so the
+    pixel side and anything else built against this endpoint do not have to change.
     """
-    rows = [r for r in store.recent(limit=limit) if r.get("review") == "pending"]
-    return {"count": len(rows), "pending": [
-        {"id": r.get("id"), "seq": r.get("seq"), "received_at": r.get("received_at"),
-         "channel": r.get("channel"), "tier": r.get("tier"),
-         "query": (r.get("result") or {}).get("query"),
-         "title": ((r.get("result") or {}).get("interpretation") or {}).get("title"),
-         "ok": (r.get("result") or {}).get("ok", True)} for r in rows]}
+    rows = store.recent(limit=limit)
+    counts: Dict[str, int] = {}
+    for r in rows:
+        key = str(r.get("review", "pending"))
+        counts[key] = counts.get(key, 0) + 1
+    if state == "all":
+        chosen = rows
+    elif state == "decided":
+        chosen = [r for r in rows if r.get("review") in ("approved", "rejected")]
+    else:
+        chosen = [r for r in rows if r.get("review") == state]
+    out = [_review_row(r) for r in chosen]
+    body: Dict[str, Any] = {"count": len(out), "state": state, "counts": counts, "rows": out}
+    if state == "pending":
+        body["pending"] = out
+    return body
 
 
 @app.post("/api/admin/review", dependencies=[Depends(require_admin_token)])
