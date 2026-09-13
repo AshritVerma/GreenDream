@@ -1,9 +1,10 @@
 # Features
 
 What the language half does today, what each switch does, and what is deliberately left open.
-This is the canonical feature list. The service that implements it lives in the sibling
-`greendream-llm` folder; GreenDream does not import it, and that service does not edit GreenDream.
-Paths in the table below are relative to `greendream-llm`.
+This is the canonical feature list for the language half, and it is now in the same repository
+as the code it describes: the service is the `language/` directory of this repo. Paths below are
+relative to `language/`. The two halves still do not import each other — they meet over HTTP —
+they just version and ship together.
 
 ## What it does
 
@@ -38,7 +39,7 @@ renders nothing; the pixel side comes later. A day of those scenes becomes one *
 | Bench page: one query box, word counter, the draft, the arc | `GET /demo` |
 | `gpt-6-astra` wire (written, never run live) | `app/llm.py::_openai` |
 | Push into a running GreenDream as `spec` events, with the operator token | `tools/push_to_greendream.py` |
-| Proof the two repos agree, scene for scene | `tests/test_alignment.py` |
+| Proof the two halves agree, scene for scene | `tests/test_alignment.py` |
 
 ## Nothing you type is silently dropped
 
@@ -248,9 +249,10 @@ Trusted to choose a depiction. Not trusted with anything that reaches the window
   either. `schema_version: "spec-v1"` is on every draft; `tests/test_alignment.py` proves
   GreenDream's `scene.validate()` leaves a draft from here unchanged apart from dropping that
   key, so a disagreement is a test failure rather than a surprise on the building.
-- **The duplicated library is deliberate.** `app/fallback.py` mirrors GreenDream's `library.py`
-  so this service answers without that repo installed. The alignment test compares them field
-  for field; edit one and you must edit the other.
+- **The duplicated library is deliberate.** `app/fallback.py` mirrors the pixel half's
+  `library.py` so the service answers with nothing but `language/` on the path — one directory
+  is deployable on its own even though it is versioned here. The alignment test compares them
+  field for field; edit one and you must edit the other.
 - **Both directions of the handoff now work.** `GET /api/queue?since=` is the pull;
   `tools/push_to_greendream.py` is the push, and it sends the finished `spec_draft` as a `spec`
   event with its tier, channel and priority, so the model is not asked the same query twice.
@@ -371,7 +373,7 @@ The misses were not exotic — they are the first things anyone would type:
 `OK` also needed to stop being the default text. "The building shrugs politely" was the single most
 common thing it said, and `OK` on nine windows is the least interesting two letters available.
 
-**Fixed.** The library is 33 scenes with 17 of them choreographed, covering every bullet above,
+**Fixed.** The library is 33 scenes with 18 of them choreographed, covering every bullet above,
 and the aliases grew with it. `EMOTION_WORD["neutral"]` is now `None`: a mood the building cannot
 name is a colour, not a sign. Every advertised key is reachable by saying it
 (`test_every_advertised_scene_is_reachable`) and so is every alias.

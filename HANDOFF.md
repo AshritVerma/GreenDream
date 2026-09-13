@@ -26,7 +26,8 @@ Owner: Ashrit Verma (contactashrit@gmail.com, GitHub `AshritVerma`). Project is 
 ## 1. Status — what exists and is verified
 
 Everything below runs offline (no API key) and is covered by `tests/` (81 tests, pass). The
-language half lives in a **separate repo**, `greendream-llm` (137 tests) — see §2.1.
+language half is the `language/` subdirectory of this repo, with its own suite (137 tests,
+pass) — see §2.1.
 
 | area | state | where |
 |---|---|---|
@@ -71,7 +72,10 @@ greendream/
   render.py          separate service on :8110 — POST /digest (text -> spec -> clip), POST /render (spec -> clip);
                      --ingest URL interprets through the language service so preview == performance
   web/preview.html   the page render.py serves: type a phrase, watch the clip before committing to it
-  FEATURES.md        canonical feature list + backlog for the language service (greendream-llm)
+  FEATURES.md        canonical feature list + backlog for the language half in language/
+  language/          the language half: the FastAPI service on :8100 that turns five words into a
+                     validated scene draft. Its own pytest project (137 tests) and its own
+                     requirements.txt; imports nothing from here. Detail in §2.1
   common/            shared runtime — identical across all greenhack repos; treat as a library
     canvas.py        Canvas (17x9x3 float32), blobs/lines/rings/gradients, ValueNoise, fonts, Marquee, blit_mask
     engine.py        App base class, Context, build_parser(), run() 30 fps loop, main(), --gentle limiter
@@ -102,14 +106,21 @@ Upstream is `github.com/Nevin-Thinagar/17x9-Tetris` (git remote `upstream`, full
 The only contract the real building offers: `utilities/display.py` — `Frame` (numpy object array
 of `Color`, row 0 = top) and `Display.send(frame)` at ≤ 30 calls/s. Everything we built sits on it.
 
-### 2.1 The other half: `greendream-llm`
+### 2.1 The other half: `language/`
 
-The project is two repos. This one owns **pixels**; `../greendream-llm` (FastAPI, `:8100`) owns
-**words**. Neither imports the other — they meet over HTTP — and that split is deliberate: the
-thing driving 153 windows should not be the thing facing the public internet.
+The project is two halves in one repo. The root owns **pixels**; `language/` (FastAPI, `:8100`)
+owns **words**. Neither imports the other — they meet over HTTP — and that split is deliberate:
+the thing driving 153 windows should not be the thing facing the public internet. One checkout
+does not change that; it only means the two halves version, review and ship together, and that
+the alignment test in §2.1 can never be skipped for want of the other side.
+
+The service was its own repo until 13 Sept 2026 and was folded in with `git subtree add`, so its
+15 commits are part of this history. `git log -- language` shows only the import commit (git
+records the pre-import commits under their old, unprefixed paths); `git log e1002fa^2` walks the
+service's real history.
 
 ```
-greendream-llm/
+language/
   app/main.py      the API: POST /api/ingest, POST /api/preview, GET /api/state, GET /api/queue,
                    GET /api/arc, POST /api/admin/switch, GET+POST /api/admin/review
   app/llm.py       the model tier (OpenAI or Anthropic, tool use); app/fallback.py the local tier
@@ -117,30 +128,50 @@ greendream-llm/
                    lexicon_affect, compose_arc
   app/spec.py      the same scene schema and validate() as scene.py, minus the renderer
   app/store.py     append-only JSONL per day; review decisions are appended and applied on read
-  tools/push_to_greendream.py   drains GET /api/queue into this repo's POST /input as `spec` events
-  tests/test_alignment.py       imports this repo's library.py/scene.py and proves the two agree
+  app/config.py    every GD_* setting; data_dir is language/data, resolved from __file__ and not
+                   from the cwd, so it lands in one place whichever half you started from
+  pytest.ini       its own pytest project — see the `app` note below
+  requirements.txt fastapi, uvicorn, pydantic, httpx (numpy only for the alignment test)
+  tools/push_to_greendream.py   drains GET /api/queue into the runner's POST /input as `spec` events
+  tests/test_alignment.py       imports the root's library.py/scene.py and proves the two agree
   tests/test_push.py            the pusher's cursor, against fakes: what happens to a row it could
                                 not send
 ```
 
-**The duplication is load-bearing and it is tested.** `app/fallback.py` mirrors `library.py`
-(entries, beats, aliases, matcher) and `app/spec.py` mirrors `scene.py`'s schema, so that the
-service can answer without this repo installed. `tests/test_alignment.py` over there fails if
-they drift — it checks the scenes field-for-field, that both matchers agree on real phrases, and
-that a draft made there survives `scene.validate()` here unchanged. Change a scene in one file
-and you must change it in the other.
-
-Running all three (each in its own terminal):
+**Two top-level `app` names, so each half pins its own.** The runner is `app.py`; the service is
+the `app/` package under `language/`. In one tree `import app` would otherwise be decided by
+whatever was first on `sys.path`, i.e. by the directory you happened to start in. Both
+`pytest.ini` files set `pythonpath = .`, which pytest resolves against its own rootdir, so each
+half puts its own root first and neither can shadow the other. The root `pytest.ini` also names
+`language` in `norecursedirs`: the service's `tests/conftest.py` rewrites `os.environ` at import
+time to point at a scratch data dir, and that must never run inside the runner's suite. Run them
+separately, always:
 
 ```bash
-# words, on :8100
-cd ../greendream-llm && GD_GATE=open uvicorn app.main:app --port 8100
+python -m pytest -q                      # the runner, 81
+cd language && python -m pytest          # the service, 137
+```
+
+**The duplication is load-bearing and it is tested.** `app/fallback.py` mirrors `library.py`
+(entries, beats, aliases, matcher) and `app/spec.py` mirrors `scene.py`'s schema, so that the
+service can answer with nothing but its own directory on the path. `language/tests/test_alignment.py`
+fails if they drift — it checks the scenes field-for-field, that both matchers agree on real
+phrases, and that a draft made there survives `scene.validate()` here unchanged. Change a scene in
+one file and you must change it in the other. It resolves the pixel half as its parent directory
+and now **fails** rather than skips if it cannot find it, because in one repo a missing pixel half
+can only mean something is broken.
+
+Running all three from one checkout (each in its own terminal, all paths from the repo root):
+
+```bash
+# words, on :8100 — started from language/ so `app.main` is the service's package
+cd language && GD_GATE=open uvicorn app.main:app --port 8100
 # pixels, on :8000 — the token makes every non-prompt event need X-Input-Token
-cd ../GreenDream && GREENDREAM_INPUT_TOKEN=secret python main.py --open
+GREENDREAM_INPUT_TOKEN=secret python main.py --open
 # preview, on :8110 — interprets through the service, so preview == performance
 GD_INGEST_TOKEN=svc python render.py --ingest http://localhost:8100
 # hand accepted scenes to the building
-cd ../greendream-llm && GREENDREAM_INPUT_TOKEN=secret python tools/push_to_greendream.py \
+GREENDREAM_INPUT_TOKEN=secret python language/tools/push_to_greendream.py \
     --api http://localhost:8100 --target http://localhost:8000 --api-token svc
 ```
 
@@ -169,13 +200,15 @@ fireflies.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate     # Python 3.10–3.12
-pip install -r requirements.txt                        # numpy, pygame, pytest
+pip install -r requirements.txt                        # numpy, pygame, pytest — the pixel half
+pip install -r language/requirements.txt               # fastapi, uvicorn — only if you run :8100
 python main.py --open                                  # browser simulator at http://localhost:8000
 python main.py --demo --open --offline                 # the compressed day (1 s = 10 min)
 python main.py --display sundai:olive-koala            # stream to the hack's hosted simulator
 python main.py --display sundai:olive-koala+web        # both at once
 python main.py --time-scale 600 --start-hour 17        # fast clock starting at 17:00
-python -m pytest -q
+python -m pytest -q                                    # the pixel half, 81
+cd language && python -m pytest                        # the language half, 137 (see §2.1)
 ```
 
 Environment variables:
@@ -439,7 +472,7 @@ is the only text the facade ever displays).
 
 Done, and the reason each is listed here rather than deleted is that the remaining items depend
 on them: `BLOCKLIST` covers hate, violence, self-harm, campaigning, advertising and personal
-harassment on word boundaries (mirrored in both repos, and `test_alignment.py` fails if the two
+harassment on word boundaries (mirrored in both halves, and `test_alignment.py` fails if the two
 disagree); PII is scrubbed before a prompt is written down; remote submissions land as `pending`
 and an operator works through `GET/POST /api/admin/review` before they can be pushed; `/input`
 takes a token for everything except a prompt, and prompts are rate limited per IP; the journal

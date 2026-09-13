@@ -36,6 +36,18 @@ python main.py --display pygame      # the original DummyDisplay window
 python -m pytest -q                  # smoke tests
 ```
 
+The two halves run side by side out of this one checkout — pixels here, words in `language/`:
+
+```bash
+pip install -r requirements.txt -r language/requirements.txt
+cd language && uvicorn app.main:app --port 8100   # words: five words in, a scene draft out
+python main.py --open                             # pixels: the building, on :8000
+python render.py --ingest http://localhost:8100   # preview on :8110, interpreted by the service
+```
+
+Each half has its own test suite and is run separately (`python -m pytest -q` here, `cd language
+&& python -m pytest` there) — see `HANDOFF.md` §2.1 for why they are never collected together.
+
 **Controls**
 - Type / 🎤 Say it · phone page `/say` · `/journal` · Phase selector (auto/dawn/day/dusk/night) · clock speed · hour · 🌙 dream now · ⏭ skip
 - `--offline`, `--time-scale 600` (a day in 2.4 min), `--start-hour`, `--journal DIR`; `ANTHROPIC_API_KEY` for open-vocabulary prompts and Claude-written dreams (`ANTHROPIC_MODEL_DREAM`, default claude-sonnet-4-5).
@@ -71,7 +83,8 @@ The only contract is `utilities/display.py` (`Frame`, `Color`, `Display.send`). 
 | `main.py` | entry point |
 | `common/` | shared runtime: canvas & effects, 30 FPS loop, display back-ends, browser simulator (`common/web/`) |
 | `tests/` | headless smoke tests, the scene contract, the input gate, the digest path |
-| `FEATURES.md` | the language service (`../greendream-llm`): what it does and what is left |
+| `language/` | the language half: the FastAPI service on :8100 that turns five words into a scene draft |
+| `FEATURES.md` | the canonical feature list for `language/`: what it does and what is left |
 | `demo/` | `recording.json` + `preview.gif` of the scripted demo |
 | `utilities/`, `tetris.py` | the upstream Tetris repo, untouched |
 

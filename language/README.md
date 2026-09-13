@@ -1,31 +1,49 @@
-# greendream-llm
+# GreenDream · the language half
 
-The language half of GreenDream, as its own service. Someone gets up to five words to say what
-they want to see; this API turns those words into one scene the Green Building could show.
-**It renders no pixels** — it stops at a validated scene draft, which is the handoff point to
-the facade runtime.
+The `language/` directory of the GreenDream repo: the API that reads words. Someone gets up to
+five words to say what they want to see; this service turns those words into one scene the Green
+Building could show. **It renders no pixels** — it stops at a validated scene draft, which is the
+handoff point to the facade runtime one directory up.
 
 Five words is the budget for one idea, not five ideas. "a rocket launch" is one query and one
 scene. A day of queries becomes one story at `GET /api/arc`, which is what seeds the night.
 
-Independent of the GreenDream repo on purpose: nothing here imports it, nothing here edits it,
-and it can be deployed, restarted, and rate-limited without touching the thing driving 153
-windows. The canonical feature list is GreenDream's `FEATURES.md`.
+Separate from the runtime on purpose, and still separate now that it is versioned with it:
+nothing here imports the pixel half, nothing here edits it, they meet only over HTTP, and this
+directory can be deployed, restarted and rate-limited without touching the thing driving 153
+windows. What one repo buys is that a change to a scene lands on both sides in one commit, and
+the alignment test that proves the two agree can no longer be skipped for want of the other half.
+
+The canonical feature list for everything below is `../FEATURES.md`, at the root of the repo.
 
 ## Run it
 
+From the repo root, once, for both halves:
+
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env            # optional; fill in OPENAI_API_KEY to enable the model
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8100
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r language\requirements.txt
 ```
 
+Then, from this directory:
+
+```powershell
+Copy-Item .env.example .env            # optional; fill in OPENAI_API_KEY to enable the model
+..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8100
+```
+
+**Start it from here, not from the repo root.** The root has a top-level `app.py` (the runner) and
+this directory has a top-level `app/` package, so `app.main` only means this service when
+`language/` is what is first on `sys.path`. The data directory is resolved from `__file__` rather
+than the cwd, so the JSONL log always lands in `language/data` either way.
+
 A bench page for trying it by hand is at http://localhost:8100/demo, interactive API docs at
-`/docs`. Tests: `.\.venv\Scripts\python.exe -m pytest -q` (125 tests, no network, no key needed).
-`tests/test_alignment.py` also imports GreenDream's `library.py` and `scene.py` when that repo is
-checked out next to this one, to prove a draft made here plays there unchanged; it skips when it
-is not (set `GREENDREAM_PATH` to point at it elsewhere).
+`/docs`. Tests, from this directory: `..\.venv\Scripts\python.exe -m pytest` (137 tests, no
+network, no key needed). The same `app` collision is why this directory has its own `pytest.ini`
+with `pythonpath = .`, and why the root suite does not collect these tests — see `HANDOFF.md`
+§2.1. `tests/test_alignment.py` imports the pixel half's `library.py` and `scene.py` to prove a
+draft made here plays there unchanged; it finds them in the parent directory and fails rather
+than skips if they are missing (set `GREENDREAM_PATH` to compare against a checkout elsewhere).
 
 With no key it still answers every request — see the local tier below.
 
@@ -41,7 +59,7 @@ With no key it still answers every request — see the local tier below.
 | `POST /api/admin/switch` | the off switches: `{"llm": "on"\|"off", "gate": "auto"\|"open"\|"closed"}` |
 | `GET /api/health` | liveness, plus whether the model tier is actually available |
 
-`GET /api/library` lists the 12 warm-library queries and their aliases, which is useful when
+`GET /api/library` lists the 33 warm-library queries and their aliases, which is useful when
 writing frontend copy or picking demo phrases.
 
 ## One query in
@@ -100,14 +118,14 @@ built from either without another round trip to the model.
 
 `match`, `unused_words` and `coverage` stop the answer from pretending it understood more than it
 did — the local tier will happily unlock a canned scene off one recognised word, and these fields
-are how the frontend can say so out loud. See GreenDream's `FEATURES.md`.
+are how the frontend can say so out loud. See `../FEATURES.md`.
 
 ## Two tiers, one shape
 
 1. **Claude** — one tool-use call, forced to the `perform` tool whose schema is the scene
    vocabulary. System prompt is cached, so every request after the first pays only for the
    query. Timeout 8 s.
-2. **Local** — a warm library of 12 hand-written scenes with aliases and a fuzzy match, then an
+2. **Local** — a warm library of 33 hand-written scenes with aliases and a fuzzy match, then an
    affect lexicon that maps valence and arousal onto palette, motion, particles and tempo.
    No network, no key, deterministic.
 
@@ -165,12 +183,15 @@ tokens. `.env` is gitignored; **never commit a key.**
 ## Handing off to pixels
 
 `GET /api/queue?since=<cursor>` is the pull path: hold the returned `cursor` and pass it back.
-`tools/push_to_greendream.py` is the push path, written but not wired — it reads the queue and
-posts `{"type": "text", ...}` to a running GreenDream's `/input`, which is vocabulary that
-instance already understands. When the renderer learns to accept a finished draft, it should
-send `spec_draft` instead so the model is not asked the same question twice.
+`tools/push_to_greendream.py` is the push path, and it is wired: it drains the queue and posts
+the finished `spec_draft` as a `spec` event to a running runner's `/input`, so the model is not
+asked the same question twice. It holds a cursor and only advances past rows it actually dealt
+with — `tests/test_push.py` pins that. A `spec` event drives the building, so the runner wants
+its operator token in `GREENDREAM_INPUT_TOKEN`.
+
+Run from the repo root (it speaks only HTTP; it imports nothing from either half):
 
 ```bash
-python tools/push_to_greendream.py --api http://localhost:8100 --target http://localhost:8000 --once
-python tools/smoke.py --api http://localhost:8100 --admin-token ...
+python language/tools/push_to_greendream.py --api http://localhost:8100 --target http://localhost:8000 --once
+python language/tools/smoke.py --api http://localhost:8100 --admin-token ...
 ```

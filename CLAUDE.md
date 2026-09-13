@@ -10,5 +10,8 @@ Hard rules for this codebase:
 - The model never draws pixels: new visuals = a new field in `scene.SCHEMA` + renderer support + a `validate()` rule.
 - Raw user text is never displayed on the facade; only the validated `word` (A–Z ! ?, ≤ 7 chars).
 - Keep `python -m pytest -q` green and `python main.py --demo --offline --duration 30 --display null` running before you finish a change.
+- Two halves, one repo: pixels at the root, the language service in `language/`. Two `app` names
+  (`app.py` and `language/app/`), so two pytest projects that are never collected together —
+  `python -m pytest -q` here (81), `cd language; python -m pytest` there (137). See `HANDOFF.md` §2.1.
 - Never commit secrets (`ANTHROPIC_API_KEY`, the hack event password). The simulator instance name `olive-koala` is fine to reference.
 - Git: pull first, summarize what was done, wait for Ashrit's explicit approval before pushing.
