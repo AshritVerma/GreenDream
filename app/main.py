@@ -18,9 +18,10 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import fallback, gate, llm, ratelimit, store, sun
+from .demo import DEMO_PAGE
 from .config import settings
 from .models import (Arc, GateInfo, IngestRequest, IngestResponse, PhraseResult,
                      StateResponse, SwitchRequest)
@@ -100,8 +101,15 @@ def index() -> Dict[str, Any]:
         "accepting": g["accepting"],
         "phase": g["phase"],
         "endpoints": ["POST /api/ingest", "GET /api/state", "GET /api/queue", "POST /api/admin/switch", "GET /api/health"],
+        "demo": "/demo",
         "docs": "/docs",
     }
+
+
+@app.get("/demo", response_class=HTMLResponse, include_in_schema=False)
+def demo() -> str:
+    """A bench for trying the API by hand. Not the product frontend."""
+    return DEMO_PAGE
 
 
 @app.get("/api/health")
