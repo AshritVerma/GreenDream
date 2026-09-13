@@ -1,7 +1,7 @@
 """Manual smoke test against a running server: state, a handful of queries, both switch
 positions, the day's arc.
 
-    python tools/smoke.py --api http://localhost:8100 --admin-token ...
+    python language/tools/smoke.py --api http://localhost:8100 --admin-token ...
 
 Prints the tier that answered and the draft for each query, which is the fastest way to see
 whether a real API key is doing anything useful.

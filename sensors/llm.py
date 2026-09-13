@@ -3,7 +3,7 @@
 A small lexicon that never blocks and is deterministic across processes, so the demo
 plays the same way every time. This is the last tier of the prompt engine (``genie``):
 when a phrase is not in the warm library and the model is unavailable, its mood still
-colours the tower. The language service (``greendream-llm/app/fallback.py``) carries
+colours the tower. The language service (``language/app/fallback.py``) carries
 the same table; keep them aligned.
 
 Negation is read: "not happy" lands on the other side of zero from "happy", and the

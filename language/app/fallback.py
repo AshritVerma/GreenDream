@@ -10,9 +10,9 @@ Two stages, both deterministic (same query in, same draft out, in any process):
 
 This module is also the moderation gate (`BLOCKLIST`) and the day-level arc composer.
 
-`LIBRARY`, `BEATS` and `ALIASES` are mirrored, entry for entry, by GreenDream's `library.py`
-(`tests/test_alignment.py` pins the two together when both repos are checked out side by
-side). Change a scene here and there, or the preview and the performance stop matching.
+`LIBRARY`, `BEATS` and `ALIASES` are mirrored, entry for entry, by the pixel half's
+`library.py` one directory up (`tests/test_alignment.py` pins the two together). Change a
+scene here and there, or the preview and the performance stop matching.
 """
 
 from __future__ import annotations

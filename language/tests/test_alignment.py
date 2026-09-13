@@ -4,11 +4,11 @@ This service decides what five words mean; GreenDream turns the answer into ligh
 library is duplicated on purpose - neither repo should import the other - so the copies can
 drift, and a drifted copy means the preview someone approved is not the scene that plays.
 
-These tests read GreenDream's `library.py` and `scene.py` directly and compare. They skip
-when the repo is not checked out next to this one (CI, a fresh clone), which is the honest
-outcome: the check is only possible where both halves exist.
+These tests read GreenDream's `library.py` and `scene.py` directly and compare. Both halves
+now live in one repo — this service is the `language/` subdirectory of it — so the pixel side
+is always there and a missing one is a failure rather than a skip.
 
-Point GREENDREAM_PATH at the checkout to run it elsewhere.
+Point GREENDREAM_PATH at a checkout to compare against a different one.
 """
 
 from __future__ import annotations
@@ -27,9 +27,10 @@ HERE = Path(__file__).resolve().parent.parent
 
 
 def _greendream_root() -> Optional[Path]:
+    """The pixel half: the repo this service is a subdirectory of, or GREENDREAM_PATH."""
     env = os.environ.get("GREENDREAM_PATH")
     candidates = [Path(env)] if env else []
-    candidates += [HERE.parent / "GreenDream", HERE.parent / "greendream"]
+    candidates.append(HERE.parent)
     for path in candidates:
         if (path / "library.py").is_file() and (path / "scene.py").is_file():
             return path
@@ -37,14 +38,20 @@ def _greendream_root() -> Optional[Path]:
 
 
 ROOT = _greendream_root()
-pytestmark = pytest.mark.skipif(ROOT is None, reason="GreenDream is not checked out next to this repo")
+assert ROOT is not None, (
+    f"the pixel half is not at {HERE.parent} (library.py, scene.py). This service lives inside "
+    "the GreenDream repo; set GREENDREAM_PATH to compare against a checkout elsewhere."
+)
 
 
 def _load(name: str):
-    """Import a GreenDream module by path ("library", "sensors/llm"), with its root importable."""
-    assert ROOT is not None
+    """Import a GreenDream module by path ("library", "sensors/llm"), with its root importable.
+
+    Appended, never prepended: the repo root holds a top-level `app.py` and this service holds a
+    top-level `app/` package, so putting the root first would silently shadow our own `app`.
+    """
     if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
+        sys.path.append(str(ROOT))
     path = ROOT.joinpath(*f"{name}.py".split("/"))
     spec = importlib.util.spec_from_file_location("_gd_" + name.replace("/", "_"), path)
     assert spec and spec.loader, path

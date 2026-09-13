@@ -1,9 +1,10 @@
 """Drain the ingest queue into a running GreenDream instance.
 
-The push half of the handoff to pixels. It does not touch the GreenDream repo, it only
-speaks its existing HTTP vocabulary: `POST /input` becomes an event on its InputBus.
+The push half of the handoff to pixels. It does not import anything from the runner one
+directory up, it only speaks its existing HTTP vocabulary: `POST /input` becomes an event on
+its InputBus. Both halves are in one repo; they still meet only over HTTP.
 
-    python tools/push_to_greendream.py --api http://localhost:8100 --target http://localhost:8000
+    python language/tools/push_to_greendream.py --api http://localhost:8100 --target http://localhost:8000
 
 What it sends is a `spec` event carrying the finished `spec_draft`, not the raw query. That
 matters for three reasons: the model is not asked the same question twice (the answer was
