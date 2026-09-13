@@ -1,0 +1,19 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+models/*.task
+models/*.tflite
+weather_cache.json
+cert.pem
+key.pem
+/recording.json
+/*.gif
+
+.venv/
+venv/
+.env
+
+# Runtime: what people said and what it dreamt. Local to each run; the prompts are
+# other people's words, so they do not belong in the repo.
+journal/
+_tmpjournal/

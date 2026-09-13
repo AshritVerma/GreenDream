@@ -1,0 +1,5 @@
+# Python 3.10-3.12 recommended (MediaPipe / pygame wheels). Everything below except numpy is optional at runtime.
+numpy
+pygame
+pytest
+# keyboard        # only needed by the upstream tetris.py (python tetris.py)

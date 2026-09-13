@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ — Green Building simulator</title>
+<style>
+  :root { --bg:#07090f; --panel:#0f131c; --line:#1d2431; --text:#e6e9ef; --muted:#8a94a6; --accent:#7cc4ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+  #app { display:grid; grid-template-columns: 1fr 340px; height:100vh; }
+  #stage { position:relative; min-width:0; }
+  #facade { width:100%; height:100%; display:block; cursor: crosshair; }
+  #hud { position:absolute; left:12px; top:10px; font-size:12px; color:var(--muted); background:rgba(0,0,0,.35); padding:4px 8px; border-radius:6px; }
+  #hud b { color:var(--text); }
+  #panel { border-left:1px solid var(--line); background:var(--panel); overflow:auto; padding:16px; display:flex; flex-direction:column; gap:14px; }
+  h1 { font-size:17px; margin:0; letter-spacing:.2px; }
+  .sub { color:var(--muted); font-size:12.5px; margin-top:4px; }
+  .box { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .box h2 { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 8px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:3px 0; font-size:13px; }
+  .row .k { color:var(--muted); }
+  .row .v { font-variant-numeric: tabular-nums; }
+  .bar { height:6px; background:#1a2130; border-radius:3px; flex:1; margin:0 8px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); width:0; transition:width .15s; }
+  button { background:#182131; color:var(--text); border:1px solid #27324a; border-radius:6px; padding:7px 10px; font:inherit; cursor:pointer; }
+  button:hover { background:#1f2b41; }
+  button:active { transform: translateY(1px); }
+  .ctl { display:flex; flex-direction:column; gap:8px; }
+  .ctl label { font-size:12px; color:var(--muted); display:flex; justify-content:space-between; }
+  input[type=range] { width:100%; }
+  input[type=text], select { width:100%; background:#0b0f17; color:var(--text); border:1px solid #27324a; border-radius:6px; padding:7px 8px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; }
+  .note { font-size:12px; color:var(--muted); }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; color:var(--muted); max-height:140px; overflow:auto; white-space:pre-wrap; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:99px; font-size:11px; background:#16321c; color:#9be7a8; }
+  .pill.off { background:#3a1717; color:#f2a5a5; }
+  a { color:var(--accent); }
+  @media (max-width: 760px) { #app { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; } #panel { border-left:0; border-top:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="facade"></canvas>
+    <div id="hud"><b id="fps">–</b> fps · <span id="conn" class="pill off">connecting</span> · <span id="cell">—</span></div>
+  </div>
+  <div id="panel">
+    <div>
+      <h1 id="title">__TITLE__</h1>
+      <div class="sub" id="desc">__DESC__</div>
+    </div>
+    <div class="box" id="statusBox" hidden><h2>Body state</h2><div id="status"></div></div>
+    <div class="box" id="controlsBox" hidden><h2>Controls</h2><div id="controls" class="ctl"></div></div>
+    <div class="box"><h2>Say something</h2>
+      <div style="display:flex; gap:6px"><input type="text" id="say" placeholder="type and press Enter"><button id="sayBtn">Send</button></div>
+      <div class="note" style="margin-top:6px">Mouse over the tower = presence. Click = touch. Keys are forwarded to the app.</div>
+    </div>
+    <div class="box"><h2>Event log</h2><div id="log"></div></div>
+    <div class="note">Simulator for the MIT Green Building (17×9 windows, 30 FPS). Frames stream from the Python app over SSE; your input goes back over POST <code>/input</code>.</div>
+  </div>
+</div>
+<script>
+/*FACADE_JS*/
+</script>
+<script>
+(function(){
+  const cv = document.getElementById('facade');
+  const facade = new Facade(cv, {reflection:true});
+  const fpsEl = document.getElementById('fps'), connEl = document.getElementById('conn'), cellEl = document.getElementById('cell');
+  const logEl = document.getElementById('log');
+  let frames = 0, lastFps = performance.now();
+  function log(s){ const d = new Date(); logEl.textContent = (d.toLocaleTimeString() + '  ' + s + '\n' + logEl.textContent).slice(0, 4000); }
+  function post(ev){ ev.source = ev.source || 'web'; fetch('/input', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(ev)}).catch(()=>{}); }
+  window.addEventListener('resize', () => { facade.resize(); facade.draw(facade.last); });
+
+  // ---- frame stream
+  function connect(){
+    const es = new EventSource('/stream');
+    es.addEventListener('frame', e => { facade.draw(e.data); frames++; });
+    es.addEventListener('controls', e => renderControls(JSON.parse(e.data)));
+    es.addEventListener('status', e => renderStatus(JSON.parse(e.data)));
+    es.addEventListener('meta', e => { const m = JSON.parse(e.data); if (m.title) { document.getElementById('title').textContent = m.title; document.title = m.title + ' — Green Building simulator'; } if (m.description) document.getElementById('desc').textContent = m.description; });
+    es.onopen = () => { connEl.textContent = 'live'; connEl.className = 'pill'; };
+    es.onerror = () => { connEl.textContent = 'reconnecting'; connEl.className = 'pill off'; };
+  }
+  connect();
+  setInterval(() => { const now = performance.now(); fpsEl.textContent = (frames * 1000 / (now - lastFps)).toFixed(0); frames = 0; lastFps = now; }, 1000);
+
+  // ---- status ("body state") panel
+  const statusBox = document.getElementById('statusBox'), statusEl = document.getElementById('status');
+  function renderStatus(st){
+    statusBox.hidden = false;
+    let html = '';
+    for (const k in st) {
+      const v = st[k];
+      if (typeof v === 'number' && v >= 0 && v <= 1 && !Number.isInteger(v)) {
+        html += '<div class="row"><span class="k">' + k + '</span><span class="bar"><i style="width:' + (v*100).toFixed(0) + '%"></i></span><span class="v">' + v.toFixed(2) + '</span></div>';
+      } else {
+        html += '<div class="row"><span class="k">' + k + '</span><span class="v">' + (typeof v === 'number' ? (Number.isInteger(v) ? v : v.toFixed(2)) : String(v)) + '</span></div>';
+      }
+    }
+    statusEl.innerHTML = html;
+  }
+
+  // ---- controls generated by the app
+  const controlsBox = document.getElementById('controlsBox'), controlsEl = document.getElementById('controls');
+  function renderControls(list){
+    controlsBox.hidden = !list.length;
+    controlsEl.innerHTML = '';
+    let btnRow = null;
+    for (const c of list) {
+      if (c.type === 'button') {
+        if (!btnRow) { btnRow = document.createElement('div'); btnRow.className = 'btns'; controlsEl.appendChild(btnRow); }
+        const b = document.createElement('button'); b.textContent = c.label;
+        b.onclick = () => { post(Object.assign({}, c.event)); log('▶ ' + c.label); };
+        btnRow.appendChild(b); continue;
+      }
+      btnRow = null;
+      const wrap = document.createElement('div');
+      if (c.type === 'slider') {
+        const lab = document.createElement('label'); const val = document.createElement('span'); val.textContent = c.value;
+        lab.textContent = c.label; lab.appendChild(val);
+        const inp = document.createElement('input'); inp.type = 'range'; inp.min = c.min; inp.max = c.max; inp.step = c.step || 1; inp.value = c.value;
+        inp.oninput = () => { val.textContent = inp.value; const ev = Object.assign({}, c.event); ev[c.key || 'value'] = parseFloat(inp.value); post(ev); };
+        wrap.appendChild(lab); wrap.appendChild(inp);
+      } else if (c.type === 'select') {
+        const lab = document.createElement('label'); lab.textContent = c.label; wrap.appendChild(lab);
+        const sel = document.createElement('select');
+        for (const o of c.options) { const op = document.createElement('option'); op.value = o; op.textContent = o; sel.appendChild(op); }
+        if (c.value) sel.value = c.value;
+        sel.onchange = () => { const ev = Object.assign({}, c.event); ev[c.key || 'value'] = sel.value; post(ev); log('▶ ' + c.label + ' = ' + sel.value); };
+        wrap.appendChild(sel);
+      } else if (c.type === 'toggle') {
+        const b = document.createElement('button'); let on = !!c.value;
+        const paint = () => { b.textContent = (on ? '● ' : '○ ') + c.label; };
+        paint();
+        b.onclick = () => { on = !on; paint(); const ev = Object.assign({}, c.event); ev[c.key || 'on'] = on; post(ev); };
+        wrap.appendChild(b);
+      } else if (c.type === 'speech') {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const b = document.createElement('button'); let rec = null, on = false;
+        if (!SR) { b.textContent = '🎤 ' + c.label + ' (needs Chrome/Safari)'; b.disabled = true; }
+        else {
+          b.textContent = '🎤 ' + c.label;
+          b.onclick = () => {
+            if (on) { on = false; try { rec.stop(); } catch (e) {} b.textContent = '🎤 ' + c.label; return; }
+            rec = new SR(); rec.continuous = true; rec.interimResults = false; rec.lang = c.lang || 'en-US';
+            rec.onresult = ev => { for (let i = ev.resultIndex; i < ev.results.length; i++) if (ev.results[i].isFinal) { const t = ev.results[i][0].transcript.trim(); if (t) { post({type:'text', text:t, speech:true}); log('🎤 ' + t); } } };
+            rec.onend = () => { if (on) { try { rec.start(); } catch (e) {} } };
+            rec.onerror = e => { log('mic: ' + e.error); };
+            try { rec.start(); on = true; b.textContent = '⏹ listening…'; } catch (e) { log('mic failed'); }
+          };
+        }
+        wrap.appendChild(b);
+      } else if (c.type === 'note') {
+        wrap.className = 'note'; wrap.textContent = c.text;
+      } else if (c.type === 'link') {
+        wrap.innerHTML = '<a href="' + c.href + '" target="_blank">' + c.label + '</a>' + (c.text ? ' <span class="note">' + c.text + '</span>' : '');
+      }
+      controlsEl.appendChild(wrap);
+    }
+  }
+
+  // ---- mouse / touch = presence & touch
+  let lastMove = 0, hover = null;
+  function pos(e){ const r = cv.getBoundingClientRect(); const t = e.touches ? e.touches[0] : e; return {x: t.clientX - r.left, y: t.clientY - r.top}; }
+  cv.addEventListener('mousemove', e => {
+    const p = pos(e), cell = facade.cellAt(p.x, p.y);
+    cellEl.textContent = cell ? ('r' + cell.r + ' c' + cell.c) : '—';
+    const now = performance.now(); if (now - lastMove < 40) return; lastMove = now;
+    hover = cell;
+    post({type:'mouse', x: p.x / cv.clientWidth, y: p.y / cv.clientHeight, r: cell ? cell.r : null, c: cell ? cell.c : null, nr: cell ? cell.nr : null, nc: cell ? cell.nc : null, over: !!cell});
+  });
+  cv.addEventListener('mouseleave', () => { hover = null; post({type:'mouse', over:false, r:null, c:null}); cellEl.textContent = '—'; });
+  function down(e){ const p = pos(e), cell = facade.cellAt(p.x, p.y); post({type:'touch', down:true, r: cell ? cell.r : null, c: cell ? cell.c : null, nr: cell ? cell.nr : null, nc: cell ? cell.nc : null, x: p.x / cv.clientWidth, y: p.y / cv.clientHeight}); if (cell) log('touch r' + cell.r + ' c' + cell.c); }
+  function up(e){ post({type:'touch', down:false}); }
+  cv.addEventListener('mousedown', down); cv.addEventListener('mouseup', up);
+  cv.addEventListener('touchstart', e => { down(e); e.preventDefault(); }, {passive:false});
+  cv.addEventListener('touchmove', e => { const p = pos(e), cell = facade.cellAt(p.x, p.y); const now = performance.now(); if (now - lastMove < 40) return; lastMove = now; post({type:'mouse', over: !!cell, r: cell ? cell.r : null, c: cell ? cell.c : null, nr: cell ? cell.nr : null, nc: cell ? cell.nc : null, x: p.x / cv.clientWidth, y: p.y / cv.clientHeight}); e.preventDefault(); }, {passive:false});
+  cv.addEventListener('touchend', up);
+
+  // ---- keyboard
+  const say = document.getElementById('say');
+  function send(){ const t = say.value.trim(); if (!t) return; post({type:'text', text:t}); log('you: ' + t); say.value = ''; }
+  document.getElementById('sayBtn').onclick = send;
+  say.addEventListener('keydown', e => { if (e.key === 'Enter') { send(); e.stopPropagation(); } });
+  window.addEventListener('keydown', e => { if (e.target === say) return; if (e.repeat) return; post({type:'key', key:e.key, down:true}); if (e.key === ' ') e.preventDefault(); });
+  window.addEventListener('keyup', e => { if (e.target === say) return; post({type:'key', key:e.key, down:false}); });
+})();
+</script>
+</body>
+</html>

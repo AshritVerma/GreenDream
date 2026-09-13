@@ -1,0 +1,6 @@
+# The repo stores text as LF regardless of the machine that committed it. Without this,
+# a Windows checkout commits CRLF and tools/make_cert.sh stops running on macOS/Linux.
+* text=auto eol=lf
+*.sh text eol=lf
+*.gif binary
+*.png binary
