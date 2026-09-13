@@ -3,6 +3,7 @@ tier always answers, and nothing the model says is trusted without clamping."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import pytest
@@ -316,7 +317,7 @@ def with_stub_llm(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "offline", False)
     settings.set_llm(True)
-    monkeypatch.setattr(llm, "call_claude", lambda query, timeout=None: _stub_tool_input())
+    monkeypatch.setattr(llm, "call_model", lambda query, timeout=None: _stub_tool_input())
 
 
 def test_model_answer_is_clamped(with_stub_llm):
@@ -329,11 +330,74 @@ def test_model_answer_is_clamped(with_stub_llm):
     assert latency >= 0
 
 
+def test_astra_is_called_through_the_responses_api(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GD_PROVIDER", raising=False)
+    monkeypatch.delenv("GD_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    settings.refresh()
+    assert (settings.provider, settings.model, settings.reasoning_effort) == ("openai", "gpt-6-astra", "high")
+    monkeypatch.setattr(settings, "offline", False)
+
+    seen = {}
+
+    def fake_post(url, body, headers, timeout):
+        seen.update(url=url, body=body, headers=headers)
+        # the Responses API hands function arguments back as a JSON string
+        return {"output": [{"type": "reasoning", "summary": []},
+                           {"type": "function_call", "name": "perform",
+                            "arguments": json.dumps(_stub_tool_input())}]}
+
+    monkeypatch.setattr(llm, "_post", fake_post)
+    settings.set_llm(True)
+    raw = llm.call_model("the green line")
+
+    assert raw["spec"]["title"] == "green line"
+    assert seen["url"] == llm.OPENAI_URL
+    assert seen["headers"]["authorization"] == "Bearer test-key"
+    assert seen["body"]["reasoning"] == {"effort": "high"}
+    assert seen["body"]["tool_choice"] == {"type": "function", "name": "perform"}
+    assert "temperature" not in seen["body"], "astra does not take one"
+    assert "17 rows by 9 columns" in seen["body"]["instructions"]
+    assert "judgment call" in seen["body"]["instructions"], "the sprite decision is the model's"
+
+
+def test_anthropic_stays_available_as_the_other_provider(monkeypatch):
+    monkeypatch.setenv("GD_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.delenv("GD_MODEL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+    settings.refresh()
+    assert (settings.provider, settings.model) == ("anthropic", "claude-haiku-4-5")
+    monkeypatch.setattr(settings, "offline", False)
+
+    seen = {}
+
+    def fake_post(url, body, headers, timeout):
+        seen.update(url=url, headers=headers)
+        return {"content": [{"type": "tool_use", "input": _stub_tool_input()}]}
+
+    monkeypatch.setattr(llm, "_post", fake_post)
+    settings.set_llm(True)
+    assert llm.call_model("the green line")["spec"]["title"] == "green line"
+    assert seen["url"] == llm.ANTHROPIC_URL and seen["headers"]["x-api-key"] == "test-key"
+
+
+def test_a_model_with_no_tool_call_is_just_a_failure(monkeypatch):
+    monkeypatch.setattr(settings, "api_key", "test-key")
+    monkeypatch.setattr(settings, "offline", False)
+    monkeypatch.setattr(settings, "provider", "openai")
+    monkeypatch.setattr(llm, "_post", lambda *a, **k: {"output": [{"type": "message", "content": "hi"}]})
+    settings.set_llm(True)
+    assert llm.call_model("anything") is None, "chatty answers are not scenes"
+
+
 def test_model_refusal_becomes_a_shrug(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "offline", False)
     settings.set_llm(True)
-    monkeypatch.setattr(llm, "call_claude", lambda query, timeout=None: {"interpretation": {}, "spec": {"ok": False}})
+    monkeypatch.setattr(llm, "call_model", lambda query, timeout=None: {"interpretation": {}, "spec": {"ok": False}})
     result, tier, _ = llm.ingest("something unspeakable")
     assert tier == "blocked" and result.spec_draft["title"] == "shrug"
 
@@ -342,7 +406,7 @@ def test_api_failure_falls_through_to_local(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "offline", False)
     settings.set_llm(True)
-    monkeypatch.setattr(llm, "call_claude", lambda query, timeout=None: None)
+    monkeypatch.setattr(llm, "call_model", lambda query, timeout=None: None)
 
     result, tier, _ = llm.ingest("a rocket launch")
     assert tier == "library"
@@ -357,7 +421,7 @@ def test_blocked_query_never_reaches_the_api(monkeypatch):
     def explode(*a, **k):
         raise AssertionError("a blocked query must not be sent to the API")
 
-    monkeypatch.setattr(llm, "call_claude", explode)
+    monkeypatch.setattr(llm, "call_model", explode)
     result, tier, _ = llm.ingest("i want to kill someone")
     assert tier == "blocked"
 
@@ -370,7 +434,7 @@ def test_llm_switch_off_skips_the_api(monkeypatch):
     def explode(*a, **k):
         raise AssertionError("the API must not be called with the switch off")
 
-    monkeypatch.setattr(llm, "call_claude", explode)
+    monkeypatch.setattr(llm, "call_model", explode)
     _, tier, _ = llm.ingest("anything at all")
     assert tier in ("library", "lexicon")
 

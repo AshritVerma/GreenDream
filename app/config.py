@@ -2,7 +2,7 @@
 
 Two independent controls, both readable at /api/state:
 
-    llm_enabled   the Claude tier. Off (or no API key) => the local fallback answers.
+    llm_enabled   the model tier. Off (or no API key) => the local fallback answers.
     gate          "auto" closes intake at sunset, "open" keeps it open, "closed" is the
                   kill switch.
 
@@ -19,6 +19,9 @@ from typing import List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
 GATE_MODES = ("auto", "open", "closed")
+PROVIDERS = ("openai", "anthropic")
+DEFAULT_MODEL = {"openai": "gpt-6-astra", "anthropic": "claude-haiku-4-5"}
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # astra's reasoning.effort ladder
 
 
 def load_dotenv(path: Optional[Path] = None) -> None:
@@ -65,8 +68,21 @@ class Settings:
         self.refresh()
 
     def refresh(self) -> None:
-        self.api_key: str = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-        self.model: str = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5").strip()
+        # Two providers, one contract. "auto" picks whichever key is present, preferring OpenAI,
+        # because the judgment this asks for (is there an iconic shape here or not?) is the part
+        # worth paying a flagship for.
+        openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        provider = os.environ.get("GD_PROVIDER", "auto").strip().lower()
+        if provider not in PROVIDERS:
+            provider = "openai" if openai_key or not anthropic_key else "anthropic"
+        self.provider: str = provider
+        self.api_key: str = openai_key if provider == "openai" else anthropic_key
+        self.model: str = (os.environ.get("GD_MODEL")
+                           or os.environ.get("ANTHROPIC_MODEL")
+                           or DEFAULT_MODEL[provider]).strip()
+        effort = os.environ.get("GD_REASONING_EFFORT", "high").strip().lower()
+        self.reasoning_effort: str = effort if effort in EFFORTS else "high"
         self.llm_timeout: float = _float("GD_LLM_TIMEOUT", 8.0)
         self.llm_enabled: bool = _bool("GD_USE_LLM", True)
         gate = os.environ.get("GD_GATE", "auto").strip().lower()
@@ -103,7 +119,7 @@ class Settings:
 
     @property
     def llm_available(self) -> bool:
-        """True when a Claude call would actually be attempted."""
+        """True when a model call would actually be attempted."""
         return bool(self.llm_enabled and self.api_key and not self.offline)
 
 

@@ -17,7 +17,7 @@ windows. `FEATURES.md` has the switch semantics and the open questions.
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env            # optional; fill in ANTHROPIC_API_KEY to enable the model
+Copy-Item .env.example .env            # optional; fill in OPENAI_API_KEY to enable the model
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8100
 ```
 
@@ -138,8 +138,11 @@ tokens. `.env` is gitignored; **never commit a key.**
 
 | var | default | effect |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | enables the model tier; absent means local only |
-| `ANTHROPIC_MODEL` | `claude-haiku-4-5` | model for the call |
+| `OPENAI_API_KEY` | — | enables the model tier via the Responses API |
+| `ANTHROPIC_API_KEY` | — | enables it via Anthropic instead; with neither key, local only |
+| `GD_PROVIDER` | `auto` | `openai` \| `anthropic` \| `auto` (whichever key exists, OpenAI first) |
+| `GD_MODEL` | `gpt-6-astra` / `claude-haiku-4-5` | model id, per provider |
+| `GD_REASONING_EFFORT` | `high` | OpenAI only: `low` … `max` |
 | `GD_USE_LLM` | `1` | `0` forces the local tier even with a key |
 | `GD_GATE` | `auto` | `auto` / `open` / `closed` |
 | `GD_MAX_WORDS` / `GD_MAX_CHARS` | `5` / `60` | how much a person may say |

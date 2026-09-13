@@ -131,6 +131,7 @@ class StateResponse(BaseModel):
     sun_source: str = "sample"
     llm_enabled: bool = False
     tier: str = "local"
+    provider: str = Field("", description="which vendor would answer: openai | anthropic")
     live_view_url: str = ""
     max_words: int = 5
     max_chars: int = 60

@@ -1,10 +1,16 @@
-"""The Claude tier: one query in, one scene draft out, tool-use so the answer is
+"""The model tier: one query in, one scene draft out, a forced tool call so the answer is
 schema-shaped, and a hard fall-through to the local tier on any trouble.
 
+Two providers behind one function. OpenAI's Responses API (`gpt-6-astra` by default, with
+`reasoning.effort` high) is the one worth paying for here, because most of what this asks for is
+judgment rather than recall: is there a silhouette in these five words that a stranger would name
+in a glance at nine windows wide, or should the whole tower carry it? Anthropic's messages API is
+kept as the alternative. Set GD_PROVIDER to pin one; "auto" follows whichever key exists.
+
 The person gets at most five words, so the model's job is narrow and the prompt can afford to
-be strict about it: read the words as one thing, pick the single most recognisable depiction,
-fill the vocabulary. The system block carries `cache_control: ephemeral`, so every request
-after the first pays only for the query.
+be strict about it: read the words as one thing, choreograph it, decide honestly whether a sprite
+earns its place. Anthropic's system block carries `cache_control: ephemeral` and OpenAI caches
+long prefixes on its own, so in both cases repeat requests mostly pay for the query.
 
 Trust boundary: the model's answer is a suggestion. The spec goes through `spec.validate()`,
 every field is clamped, and any failure at all returns the local draft instead.
@@ -23,7 +29,8 @@ from .config import settings
 from .models import Interpretation, Mood, SceneResult
 from .spec import SPEC_SCHEMA, validate
 
-API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+OPENAI_URL = "https://api.openai.com/v1/responses"
 
 INTERPRETATION_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -47,22 +54,55 @@ PERFORM_SCHEMA: Dict[str, Any] = {
     "required": ["interpretation", "spec"],
 }
 
-SYSTEM = """You are the imagination of a 21-storey building whose 153 windows (17 rows x 9 columns) are lights.
-A person on the plaza gets at most five words to say what they want to see - "a rocket launch", "my heart is racing", "the first snow". Those words are ONE thing, not a list. Read them together and turn them into one short light performance.
+SYSTEM = """You are the imagination of a building.
 
-Return two things:
-- interpretation: what the words mean, in words. Theme, 3-5 concrete nouns, mood, and an honest recognizability score.
-- spec: how to show it, filling the scene vocabulary. You never draw pixels; you choose from the vocabulary and the renderer does the rest.
+WHAT YOU ARE
+A 21-storey tower on a plaza. Its windows are your pixels: 17 rows by 9 columns, 153 of them, row 0
+at the roof. Each window is one colour at a time, and you get about 30 changes a second. People see
+you from the street below and from across the river 300 m away, mostly at night, usually for the ten
+seconds it takes to walk past. Nobody is studying you. Someone glances up.
 
-Rules that come from the building itself:
-- Pick the ONE most recognisable depiction. Bold and simple beats detailed: nine windows wide, seen from 300 m away.
-- Use a 'world' for places and weather; use 'none' plus palette, particles and a sprite for things and feelings.
-- A sprite is optional: up to 12 rows of exactly 9 characters, '#' lit and '.' dark, a bold silhouette (heart, arrow, rocket, cup, tree, star, face). Skip it when the thing has no simple silhouette; a speck or a solid slab reads as noise and will be thrown away.
-- 'word' is optional and is the only text the building may ever show: 1-7 characters, capitals, '!' and '?' allowed. Never a sentence, never the person's own words verbatim.
-- Match energy: calm things breathe slowly at low tempo; urgent things pulse or shake with bursts and high tempo.
-- Choreograph, do not pose. Almost everything worth showing happens over time, so give 'beats': 2-4 phases with what builds, what lands, and what is left. A dunk is an approach, a leap, an impact and a crowd - not a ball held still for ten seconds. Start dim and quiet and earn the bright moment; hold 'word' back (null) until the beat that deserves it. A beat names only the fields that change.
-- Set ok=false for hate, harassment, sexual content, or anything targeting a real private person. Public celebration of athletes, artists, holidays and teams is fine.
-- Be honest in recognizability: 0.9 means a stranger names it unprompted, 0.3 means it is only a mood.
+So: you are a very large, very coarse, very bright screen. What works on you is a whole-facade
+gesture - a wave climbing the tower, the building breathing, one hard white flash, everything going
+red at once. What fails on you is detail: no faces, no logos, no text beyond a few huge letters, no
+picture that needs more than nine windows of width to be read.
+
+WHAT SOMEONE GIVES YOU
+At most five words, said at a kiosk on the plaza - "a rocket launch", "my heart is racing", "lebron
+dunk as 76er". Those words are ONE thing, not a list. Read all of them together, including the
+awkward one at the end, and decide what the building becomes for ten seconds.
+
+WHAT YOU RETURN
+- interpretation: what the words mean, in words. Theme, 3-5 concrete nouns, mood, and an honest
+  recognizability score. 0.9 means a stranger names it unprompted; 0.3 means it is only a mood.
+- spec: how to show it, in the scene vocabulary. You never address individual windows except
+  through a sprite; you choose from the vocabulary and the renderer does the rest.
+
+HOW TO DECIDE
+- Choreograph, do not pose. Almost everything worth showing happens over time, so give 'beats': 2-4
+  phases with what builds, what lands, what is left. A dunk is an approach, a leap, an impact and a
+  crowd - not a ball held still for ten seconds. Earn the bright moment: start dim, and hold 'word'
+  back (null) until the beat that deserves it. A beat names only the fields that change.
+- The sprite is a judgment call, and it is yours. A sprite is up to 12 rows of exactly 9 characters,
+  '#' lit and '.' dark, drawn in one colour, sitting in the middle of the facade for the whole
+  scene. Ask: does this thing have one silhouette that a stranger would name in a glance at nine
+  windows wide - a heart, an arrow, a rocket, an umbrella, a ball, a cup, a star? Then draw it. Does
+  it not - a feeling, a place, weather, a person, a team, a season, an idea, anything whose shape is
+  either too complex or genuinely arbitrary? Then set sprite to null and let the whole building
+  carry it with world, palette, motion, particles and flash. A weak sprite is worse than none: it
+  turns the tower into a billboard showing a bad icon, and it will be thrown away as noise anyway.
+  Never try to draw letters, numbers, faces, logos or jerseys as a sprite; a number cannot be shown
+  as text either, so if the words name one, express it in colour and rhythm instead.
+- Use a 'world' for places and weather. Use 'none' plus palette and particles for things and
+  feelings.
+- 'word' is optional and is the only text the building may ever show: 1-7 characters, capitals, '!'
+  and '?' allowed, no digits. Never a sentence, never the person's own words verbatim.
+- Match energy: calm things breathe slowly at low tempo; urgent things pulse or shake with bursts
+  and high tempo.
+- Use every word you were given. If part of the query cannot be depicted, let it steer palette,
+  tempo or rhythm rather than dropping it, and say so in notes.
+- Set ok=false for hate, harassment, sexual content, or anything targeting a real private person.
+  Public celebration of athletes, artists, holidays and teams is fine.
 
 Reference depictions, the standard to match:
 %s
@@ -82,28 +122,18 @@ def _reference_block() -> str:
     return "\n".join(lines)
 
 
-def _post(body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-    req = urllib.request.Request(
-        API_URL,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "x-api-key": settings.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-            "user-agent": "greendream-llm/0.1",
-        },
-    )
+def _post(url: str, body: Dict[str, Any], headers: Dict[str, str], timeout: float) -> Dict[str, Any]:
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                 headers={"content-type": "application/json",
+                                          "user-agent": "greendream-llm/0.1", **headers})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def call_claude(query: str, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
-    """Return the raw tool input, or None if anything at all went wrong."""
-    if not settings.llm_available:
-        return None
+def _anthropic(query: str, timeout: float) -> Dict[str, Any]:
     body = {
         "model": settings.model,
-        "max_tokens": 1200,
+        "max_tokens": 1600,
         "system": [{"type": "text", "text": SYSTEM % _reference_block(),
                     "cache_control": {"type": "ephemeral"}}],
         "tools": [{"name": "perform", "description": "Perform one scene on the building",
@@ -111,23 +141,60 @@ def call_claude(query: str, timeout: Optional[float] = None) -> Optional[Dict[st
         "tool_choice": {"type": "tool", "name": "perform"},
         "messages": [{"role": "user", "content": query[: settings.max_chars]}],
     }
+    data = _post(ANTHROPIC_URL, body, {"x-api-key": settings.api_key,
+                                       "anthropic-version": "2023-06-01"}, timeout)
+    for part in data.get("content", []):
+        if part.get("type") == "tool_use" and isinstance(part.get("input"), dict):
+            return part["input"]
+    raise ValueError("no tool_use block in the response")
+
+
+def _openai(query: str, timeout: float) -> Dict[str, Any]:
+    """The Responses API. Reasoning effort is the knob that buys better judgment here.
+
+    Astra takes no temperature, so the only dials are the instructions and the effort. Function
+    arguments come back as a JSON string rather than an object, hence the extra parse.
+    """
+    body = {
+        "model": settings.model,
+        "instructions": SYSTEM % _reference_block(),
+        "input": [{"role": "user", "content": query[: settings.max_chars]}],
+        "reasoning": {"effort": settings.reasoning_effort},
+        "tools": [{"type": "function", "name": "perform",
+                   "description": "Perform one scene on the building",
+                   "parameters": PERFORM_SCHEMA}],
+        "tool_choice": {"type": "function", "name": "perform"},
+    }
+    data = _post(OPENAI_URL, body, {"authorization": f"Bearer {settings.api_key}"}, timeout)
+    for item in data.get("output", []):
+        if item.get("type") == "function_call":
+            args = item.get("arguments")
+            parsed = json.loads(args) if isinstance(args, str) else args
+            if isinstance(parsed, dict):
+                return parsed
+    raise ValueError("no function_call in the response")
+
+
+def call_model(query: str, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Return the raw tool arguments, or None if anything at all went wrong.
+
+    Every failure is the same failure from the caller's point of view: no answer, use the local
+    tier. The building must never wait on a vendor.
+    """
+    if not settings.llm_available:
+        return None
+    call = _openai if settings.provider == "openai" else _anthropic
     try:
-        data = _post(body, timeout if timeout is not None else settings.llm_timeout)
+        return call(query, timeout if timeout is not None else settings.llm_timeout)
     except urllib.error.HTTPError as e:
         detail = ""
         try:
             detail = e.read().decode("utf-8")[:300]
         except Exception:
             pass
-        print(f"[llm] HTTP {e.code} from Anthropic: {detail}", flush=True)
-        return None
-    except Exception as e:  # timeout, DNS, TLS, malformed JSON
-        print(f"[llm] call failed ({type(e).__name__}: {e})", flush=True)
-        return None
-    for part in data.get("content", []):
-        if part.get("type") == "tool_use" and isinstance(part.get("input"), dict):
-            return part["input"]
-    print("[llm] no tool_use block in the response", flush=True)
+        print(f"[llm] HTTP {e.code} from {settings.provider}: {detail}", flush=True)
+    except Exception as e:  # timeout, DNS, TLS, malformed JSON, no tool call
+        print(f"[llm] {settings.provider} call failed ({type(e).__name__}: {e})", flush=True)
     return None
 
 
@@ -169,7 +236,7 @@ def ingest(query: str) -> Tuple[SceneResult, str, int]:
     if fallback.is_blocked(query):
         return done(fallback.blocked_result(query))
 
-    raw = call_claude(query) if settings.llm_available else None
+    raw = call_model(query) if settings.llm_available else None
     if raw is None:
         return done(fallback.local_result(query))
 

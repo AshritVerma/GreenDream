@@ -15,6 +15,8 @@ renders nothing; the pixel side comes later. A day of those scenes becomes one *
 | One query of up to 5 words, 6 words rejected | done | `app/models.py::IngestRequest` |
 | Honest match reporting: `match`, `unused_words`, `coverage` | done | `app/fallback.py::local_result` |
 | `beats`: a scene is an event in time, not a held picture | done | `app/spec.py::_beats`, `app/fallback.py::BEATS` |
+| Two providers behind one call; `gpt-6-astra` at high effort by default | done | `app/llm.py::call_model` |
+| The sprite / no-sprite decision belongs to the model | done | `app/llm.py::SYSTEM` |
 | Claude tier: one tool-use call, cached system prompt | done, never run against the real API | `app/llm.py` |
 | Local tier: warm library of 12 scenes, then an affect lexicon | done, fully offline | `app/fallback.py` |
 | Spec draft validated and clamped on every path | done | `app/spec.py::validate` |
@@ -85,6 +87,29 @@ Two properties make this safe to add before the renderer exists:
 The demo page plays a rough 9 x 17 animation of a draft so choreography can be judged by eye. It
 is a sketch for reading drafts, not a second renderer, and it is deliberately not shared with
 GreenDream.
+
+## Whether to draw a shape at all is a judgment, so the model makes it
+
+A sprite is up to 12 rows of 9 characters that sits in the middle of the facade for the whole
+scene. On a 17 x 9 tower that is roughly 40% of the building, so a sprite is not a decoration: it
+is the claim "this thing has a shape, and here it is". For a heart, an arrow, an umbrella or a ball
+that claim holds. For a feeling, a season, a team, a person or a place it does not, and the tower
+ends up as a billboard showing a bad icon.
+
+No fixed rule gets this right, because it depends entirely on what was said. So the prompt hands
+the decision over with the criteria stated plainly — *does this have one silhouette a stranger would
+name in a glance at nine windows wide?* — and tells the model that a weak sprite is worse than
+none, that letters, numbers, faces, logos and jerseys are never sprites, and that a `null` sprite
+means the whole facade carries the scene through world, palette, motion, particles and flash.
+`spec.validate()` still throws away sprites that are a speck, a solid slab, or featureless, so a
+bad call degrades rather than reaching the windows.
+
+That judgment is also why the default provider is OpenAI's `gpt-6-astra` at `reasoning.effort=high`
+rather than the cheapest model that can fill in a schema. Anything can emit valid JSON; deciding
+that "lebron dunk as 76er" wants Sixers red and a rising leap but no jersey drawing is the actual
+work. Anthropic remains available behind `GD_PROVIDER=anthropic`, and both are one function,
+`call_model`, whose every failure mode is identical from the caller's side: no answer, fall through
+to the local tier. The building never waits on a vendor.
 
 ## Why five words and not five phrases
 

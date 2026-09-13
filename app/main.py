@@ -129,6 +129,7 @@ def state() -> StateResponse:
         sun_source=str(g["sun_source"]),
         llm_enabled=settings.llm_available,
         tier=settings.model if settings.llm_available else "local",
+        provider=settings.provider if settings.llm_available else "",
         live_view_url=settings.live_view_url,
         max_words=settings.max_words, max_chars=settings.max_chars,
     )
