@@ -243,27 +243,34 @@ BEATS: Dict[str, List[dict]] = {
 ALIASES: Dict[str, str] = {
     "storm": "thunderstorm", "lightning": "thunderstorm", "thunder": "thunderstorm", "thunderstorms": "thunderstorm",
     "rain": "it's raining", "rainy": "it's raining", "raining": "it's raining", "umbrella": "it's raining",
-    "snow": "snow day", "winter": "snow day", "snowing": "snow day", "blizzard": "snow day",
+    "pouring": "it's raining", "drizzle": "it's raining",
+    "snow": "snow day", "winter": "snow day", "snowing": "snow day", "blizzard": "snow day", "snowstorm": "snow day",
     "sun": "sunrise", "morning": "sunrise", "dawn": "sunrise", "good morning": "sunrise",
-    "dusk": "sunset", "evening": "sunset", "golden hour": "sunset",
-    "moon": "full moon", "moonlight": "full moon", "the moon": "full moon",
+    "dusk": "sunset", "evening": "sunset", "golden hour": "sunset", "sundown": "sunset",
+    "moon": "full moon", "moonlight": "full moon", "the moon": "full moon", "moonrise": "full moon",
     "aurora": "northern lights", "aurora borealis": "northern lights",
     "ocean": "calm ocean", "sea": "calm ocean", "waves": "calm ocean", "beach": "calm ocean", "the ocean": "calm ocean",
     "space": "take me to space", "stars": "take me to space", "warp": "take me to space", "outer space": "take me to space", "galaxy": "take me to space",
+    "milky way": "take me to space",
     "charles": "charles river", "river": "charles river", "the charles": "charles river", "sailboats": "charles river",
+    "esplanade": "charles river", "the esplanade": "charles river",
     "lava": "volcano", "eruption": "volcano", "erupting": "volcano",
     "forest": "the forest", "woods": "the forest", "trees": "the forest", "jungle": "the forest",
     "city": "city lights", "skyline": "city lights", "downtown": "city lights", "the city": "city lights",
+    "boston": "city lights",
     "happy birthday": "birthday", "party": "birthday", "cake": "birthday", "bday": "birthday",
     "rocket": "rocket launch", "launch": "rocket launch", "liftoff": "rocket launch", "blast off": "rocket launch", "spaceship": "rocket launch",
     "dunk": "lebron dunk", "lebron": "lebron dunk", "basketball": "lebron dunk", "sixers": "lebron dunk", "slam dunk": "lebron dunk",
-    "firework": "fireworks", "boom": "fireworks", "fourth of july": "fireworks", "july fourth": "fireworks", "new years": "fireworks",
+    "firework": "fireworks", "boom": "fireworks", "fourth of july": "fireworks", "july fourth": "fireworks",
+    "new years": "fireworks", "new year": "fireworks", "happy new year": "fireworks",
     "christmas": "merry christmas", "xmas": "merry christmas", "santa": "merry christmas", "happy holidays": "merry christmas",
     "graduated": "graduation", "graduate": "graduation", "commencement": "graduation", "diploma": "graduation", "graduation day": "graduation",
+    "congrats": "graduation", "congratulations": "graduation",
     "sox": "go sox", "red sox": "go sox", "fenway": "go sox", "baseball": "go sox",
     "celtics": "go celtics", "celts": "go celtics",
     "bruins": "go bruins", "hockey": "go bruins",
     "proposal": "she said yes", "engaged": "she said yes", "wedding": "she said yes", "married": "she said yes", "he said yes": "she said yes",
+    "marry me": "she said yes", "will you marry me": "she said yes",
     "hired": "i got the job", "new job": "i got the job", "promotion": "i got the job", "got the job": "i got the job",
     "home": "welcome home", "coming home": "welcome home", "homecoming": "welcome home",
     "heart": "my heart is racing", "heartbeat": "my heart is racing", "nervous": "my heart is racing", "racing heart": "my heart is racing",
@@ -271,8 +278,10 @@ ALIASES: Dict[str, str] = {
     "love": "i love you", "valentine": "i love you", "valentines": "i love you", "love you": "i love you",
     "goodnight": "good night", "sleep": "good night", "sleepy": "good night", "bedtime": "good night", "sweet dreams": "good night",
     "luck": "good luck", "lucky": "good luck", "wish me luck": "good luck",
+    "fingers crossed": "good luck", "break a leg": "good luck",
     "up": "go up", "higher": "go up",
     "espresso": "coffee", "latte": "coffee", "tea": "coffee", "caffeine": "coffee",
+    "dunkin": "coffee", "dunkies": "coffee", "dunkin donuts": "coffee",
     "tree": "a tree",
 }
 
@@ -289,6 +298,12 @@ STOPWORDS = {"the", "a", "an", "and", "or", "but", "is", "am", "are", "was", "we
 NEGATORS = {"not", "no", "never", "dont", "don't", "cant", "can't", "isnt", "isn't", "without", "nothing", "aint", "ain't"}
 # emotion words that should lose to a concrete noun in the same phrase ("i love the rain" is about rain)
 WEAK = {"happy", "love", "joy", "luck", "lucky", "home"}
+# Colours never enter the derived index. Every scene has a palette, so a colour is the least
+# discriminating word in the vocabulary, and whichever entry happens to list one wins by
+# accident of authorship: "red" reached *red sox*, so "a red balloon" and "red leaves" both put
+# GO SOX! on the facade and "a gold medal" got BRUINS. An alias may still name one on purpose.
+COLOURS = {"red", "orange", "yellow", "green", "blue", "purple", "pink", "gold", "golden",
+           "silver", "grey", "gray", "white", "black", "brown", "teal", "crimson", "scarlet"}
 
 
 def library_spec(key: str) -> dict:
@@ -301,10 +316,14 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]", " ", str(text or "").lower())).strip()
 
 
-def _build_index() -> Tuple[List[Tuple[List[str], str]], Dict[str, str]]:
-    """Phrases (longest first) and a word -> key index built from aliases, key words, keywords and titles.
+def _build_index() -> Tuple[List[Tuple[List[str], str]], Dict[str, str], set]:
+    """Phrases (longest first), a word -> key index, and the words the index had to give up on.
 
-    A derived word that could point at more than one scene is dropped; an alias always wins.
+    The index is built from aliases, key words, keywords and titles. A derived word that could
+    point at more than one scene is dropped; an alias always wins.
+
+    The dropped ones are kept, because "cannot place this word" and "have never heard this word"
+    are different facts and the typo pass needs to tell them apart. See ``match``.
     """
     phrases = [(k.split(" "), k) for k in ENTRIES] + [(a.split(" "), k) for a, k in ALIASES.items() if " " in a]
     phrases.sort(key=lambda p: -len(p[0]))
@@ -312,16 +331,25 @@ def _build_index() -> Tuple[List[Tuple[List[str], str]], Dict[str, str]]:
     for key, entry in ENTRIES.items():
         words = set(key.split(" ")) | set(entry["keywords"]) | set(normalize(entry["spec"]["title"]).split(" "))
         for w in words:
-            if len(w) >= 3 and w not in STOPWORDS:
+            if len(w) >= 3 and w not in STOPWORDS and w not in COLOURS:
                 derived.setdefault(w, set()).add(key)
     index = {w: next(iter(ks)) for w, ks in derived.items() if len(ks) == 1}
     index.update({a: k for a, k in ALIASES.items() if " " not in a})
-    return phrases, index
+    ambiguous = {w for w, ks in derived.items() if len(ks) > 1} - set(index)
+    return phrases, index, ambiguous
 
 
-PHRASES, INDEX = _build_index()
+PHRASES, INDEX, AMBIGUOUS = _build_index()
 _INDEX_WORDS = sorted(INDEX)
 _PHRASE_LIST = list(ENTRIES) + list(ALIASES)
+
+# A typo pass is a guess, so it only runs on words long enough for the guess to be worth making.
+# Below six letters it is not: one wrong letter in a five-letter word scores exactly 0.8, the
+# cutoff, so every short English word has a neighbour in the index. "late" became *coffee*
+# (latte), "tired" became *i got the job* (hired), "shana tova" became *merry christmas*
+# (santa). At six the same test catches the misspellings that matter — firewroks, chirstmas,
+# brithday, graduaton — and stops inventing scenes out of ordinary words.
+MIN_TYPO_LEN = 6
 
 
 def _negated(toks: List[str], i: int) -> bool:
@@ -335,6 +363,10 @@ def match(text: str, cutoff: float = 0.72) -> Optional[Tuple[str, str, List[str]
     words (aliases, key words, keywords, title words), then a typo-tolerant pass per word,
     then a fuzzy pass over the whole phrase. Negated words never match ("not happy" is not
     joy). ``how`` is one of exact | alias | keyword | fuzzy | surprise.
+
+    The typo pass skips anything in ``AMBIGUOUS``. "night" belongs to four scenes, so the
+    index drops it on purpose — and correcting it to "light" and landing on *joy* is worse
+    than the honest miss the drop was for. A word we know and cannot place stays unplaced.
     """
     q = normalize(text)
     if not q:
@@ -357,7 +389,7 @@ def match(text: str, cutoff: float = 0.72) -> Optional[Tuple[str, str, List[str]
         w, key = (strong or hits)[0]
         return key, ("alias" if w in ALIASES else "keyword"), [w]
     for i, w in enumerate(toks):   # a typo is still the word it obviously meant
-        if len(w) >= 4 and not _negated(toks, i):
+        if len(w) >= MIN_TYPO_LEN and w not in AMBIGUOUS and not _negated(toks, i):
             m = difflib.get_close_matches(w, _INDEX_WORDS, n=1, cutoff=0.8)
             if m:
                 return INDEX[m[0]], "fuzzy", [w]
