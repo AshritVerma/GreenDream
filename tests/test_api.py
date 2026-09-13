@@ -1,5 +1,5 @@
-"""What has to stay true: the gate closes at sunset, the local tier always answers, and
-nothing the model says is trusted without clamping."""
+"""What has to stay true: one query is one thing to show, the gate closes at sunset, the local
+tier always answers, and nothing the model says is trusted without clamping."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ import pytest
 
 from app import fallback, llm, ratelimit, spec, store, sun
 from app.config import settings
-
-FIVE = ["thunderstorm", "my heart is racing", "a rocket launch", "snow day", "i miss my dog"]
 
 NIGHT = datetime(2026, 9, 13, 22, 30)
 NOON = datetime(2026, 9, 13, 12, 0)
@@ -29,7 +27,7 @@ def test_state_reports_open_and_the_live_view(client):
     assert body["accepting"] is True
     assert body["gate_mode"] == "open"
     assert body["live_view_url"] == "https://example.test/live"
-    assert body["max_phrases"] == 5
+    assert body["max_words"] == 5
 
 
 def test_sunset_closes_intake_with_a_dreaming_body(client, at_night):
@@ -41,7 +39,7 @@ def test_sunset_closes_intake_with_a_dreaming_body(client, at_night):
     assert state["reason"] == "sunset"
     assert state["reopens_at"], "the frontend needs to say when it may ask again"
 
-    r = client.post("/api/ingest", json={"phrases": FIVE})
+    r = client.post("/api/ingest", json={"query": "a thunderstorm"})
     assert r.status_code == 423
     body = r.json()
     assert body["state"] == "dreaming"
@@ -59,69 +57,83 @@ def test_daytime_stays_open_on_auto(client, monkeypatch):
 def test_kill_switch_closes_regardless_of_the_sky(client, monkeypatch):
     monkeypatch.setattr(sun, "local_now", lambda state=None: NOON)
     settings.set_gate("closed")
-    r = client.post("/api/ingest", json={"phrases": ["sunrise"]})
+    r = client.post("/api/ingest", json={"query": "sunrise"})
     assert r.status_code == 423
     assert r.json()["state"] == "off"
 
 
-# --------------------------------------------------------------------------- local tier
+# --------------------------------------------------------------------------- one query in
 
-def test_five_phrases_answered_offline(client):
-    r = client.post("/api/ingest", json={"phrases": FIVE, "source": "web"})
+def test_one_query_becomes_one_scene(client):
+    r = client.post("/api/ingest", json={"query": "a thunderstorm over the river", "source": "web"})
     assert r.status_code == 200
     body = r.json()
 
-    assert body["tier"] == "local"
-    assert body["priority"] == "dream", "web submissions are dream material, not live"
-    assert len(body["results"]) == 5
+    assert body["tier"] == "library"
+    assert body["priority"] == "dream", "web queries are dream material, not live"
 
-    for i, result in enumerate(body["results"]):
-        assert result["index"] == i
-        assert result["tier"] in ("library", "lexicon")
-        draft = result["spec_draft"]
-        assert draft["schema_version"] == spec.SCHEMA_VERSION
-        assert draft["world"] in spec.WORLD_NAMES
-        assert draft["motion"]["kind"] in spec.MOTIONS
-        assert draft["particles"]["kind"] in spec.PARTICLES
-        assert 6 <= draft["duration_s"] <= 20
-        assert result["interpretation"]["keywords"] is not None
+    result = body["result"]
+    assert result["query"] == "a thunderstorm over the river"
+    assert result["words"] == ["a", "thunderstorm", "over", "the", "river"]
+    assert result["tier"] == "library"
 
-    arc = body["arc"]
-    assert sorted(arc["order"]) == [0, 1, 2, 3, 4]
-    assert arc["title"] and len(arc["title"]) <= 7
-    assert arc["logline"]
+    draft = result["spec_draft"]
+    assert draft["schema_version"] == spec.SCHEMA_VERSION
+    assert draft["world"] == "storm"
+    assert draft["motion"]["kind"] in spec.MOTIONS
+    assert draft["particles"]["kind"] in spec.PARTICLES
+    assert 6 <= draft["duration_s"] <= 20
+    assert result["interpretation"]["keywords"]
+
+
+def test_six_words_is_rejected(client):
+    r = client.post("/api/ingest", json={"query": "one two three four five six"})
+    assert r.status_code == 422
+    assert "at most 5 words" in str(r.json()["detail"])
+
+
+def test_five_words_is_accepted(client):
+    assert client.post("/api/ingest", json={"query": "one two three four five"}).status_code == 200
+
+
+def test_empty_query_is_rejected(client):
+    assert client.post("/api/ingest", json={"query": "   "}).status_code == 422
+    assert client.post("/api/ingest", json={}).status_code == 422
+
+
+def test_whitespace_and_control_characters_are_normalised(client):
+    body = client.post("/api/ingest", json={"query": "  a\t\trocket   launch\n "}).json()
+    assert body["result"]["query"] == "a rocket launch"
+    assert body["result"]["words"] == ["a", "rocket", "launch"]
 
 
 def test_local_tier_is_deterministic():
-    first = fallback.local_result(0, "the T is late again")
-    second = fallback.local_result(0, "the T is late again")
+    first = fallback.local_result("the T is late")
+    second = fallback.local_result("the T is late")
     assert first.spec_draft == second.spec_draft
 
 
 def test_library_hit_beats_the_lexicon():
-    result = fallback.local_result(0, "a huge THUNDERSTORM!!")
+    result = fallback.local_result("a huge THUNDERSTORM!!")
     assert result.tier == "library"
     assert result.spec_draft["world"] == "storm"
     assert result.spec_draft["flash"]["kind"] == "lightning"
 
 
-def test_blocked_phrase_never_leaves_a_scene(client):
-    r = client.post("/api/ingest", json={"phrases": ["i want to kill someone", "sunrise"]})
-    assert r.status_code == 200
-    blocked, fine = r.json()["results"]
-    assert blocked["tier"] == "blocked" and blocked["ok"] is False
-    assert blocked["spec_draft"]["title"] == "shrug"
-    assert blocked["spec_draft"]["word"] == "HMM?"
-    assert fine["ok"] is True
+def test_unknown_words_still_get_a_mood(client):
+    body = client.post("/api/ingest", json={"query": "finals week again"}).json()
+    result = body["result"]
+    assert result["tier"] == "lexicon"
+    assert result["ok"] is True
+    assert result["interpretation"]["recognizability"] <= 0.4, "a mood is not a depiction"
 
 
-def test_empty_submission_is_rejected(client):
-    assert client.post("/api/ingest", json={"phrases": ["   ", ""]}).status_code == 422
-    assert client.post("/api/ingest", json={"phrases": []}).status_code == 422
-
-
-def test_more_than_five_phrases_is_rejected(client):
-    assert client.post("/api/ingest", json={"phrases": ["a"] * 6}).status_code == 422
+def test_blocked_query_never_becomes_a_scene(client):
+    body = client.post("/api/ingest", json={"query": "kill everyone"}).json()
+    result = body["result"]
+    assert result["tier"] == "blocked" and result["ok"] is False
+    assert result["spec_draft"]["title"] == "shrug"
+    assert result["spec_draft"]["word"] == "HMM?"
 
 
 # --------------------------------------------------------------------------- validator
@@ -172,26 +184,17 @@ def test_garbage_is_still_a_usable_draft():
 # --------------------------------------------------------------------------- claude tier
 
 def _stub_tool_input():
-    """A plausible model answer: one skipped phrase, one out-of-range spec, a loose arc."""
+    """A plausible model answer with an out-of-range duration and a sentence for a word."""
     return {
-        "results": [
-            {"index": 0, "ok": True,
-             "interpretation": {"title": "green line", "theme": "place", "keywords": ["tram", "rails"],
-                                "mood": {"valence": -0.2, "arousal": 0.4}, "recognizability": 0.4,
-                                "notes": "a slow bright line"},
-             "spec": {"ok": True, "title": "green line", "duration_s": 500, "world": "city",
-                      "palette": {"base": "#0a1a12", "accent": "#5cffa6", "glow": "#ffffff"},
-                      "motion": {"kind": "sweep", "speed": 0.4, "amount": 0.3},
-                      "particles": {"kind": "none", "density": 0, "direction": "down"},
-                      "tempo_bpm": 60, "flash": {"kind": "none", "rate": 0}, "sprite": None,
-                      "word": "late again, sorry", "mood": {"valence": -0.2, "arousal": 0.4}}},
-            {"index": 2, "ok": False,
-             "interpretation": {"title": "no", "theme": "abstract", "keywords": [],
-                                "mood": {"valence": 0, "arousal": 0}, "recognizability": 0},
-             "spec": {"ok": False}},
-        ],
-        "arc": {"title": "the whole city at once", "logline": "three things", "order": [2, 99],
-                "through_line": "a night in transit", "palette": {"base": "#000000"}},
+        "interpretation": {"title": "green line", "theme": "place", "keywords": ["tram", "rails"],
+                           "mood": {"valence": -0.2, "arousal": 0.4}, "recognizability": 0.4,
+                           "notes": "a slow bright line"},
+        "spec": {"ok": True, "title": "green line", "duration_s": 500, "world": "city",
+                 "palette": {"base": "#0a1a12", "accent": "#5cffa6", "glow": "#ffffff"},
+                 "motion": {"kind": "sweep", "speed": 0.4, "amount": 0.3},
+                 "particles": {"kind": "none", "density": 0, "direction": "down"},
+                 "tempo_bpm": 60, "flash": {"kind": "none", "rate": 0}, "sprite": None,
+                 "word": "late again, sorry", "mood": {"valence": -0.2, "arousal": 0.4}},
     }
 
 
@@ -200,40 +203,50 @@ def with_stub_llm(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "offline", False)
     settings.set_llm(True)
-    monkeypatch.setattr(llm, "call_claude", lambda phrases, timeout=None: _stub_tool_input())
+    monkeypatch.setattr(llm, "call_claude", lambda query, timeout=None: _stub_tool_input())
 
 
-def test_model_answer_is_clamped_and_gaps_are_filled(with_stub_llm):
-    phrases = ["the green line", "a quiet room", "something unspeakable"]
-    results, arc, tier, latency = llm.ingest(phrases)
-
+def test_model_answer_is_clamped(with_stub_llm):
+    result, tier, latency = llm.ingest("the green line")
     assert tier == settings.model
-    assert [r.index for r in results] == [0, 1, 2]
-
-    first = results[0]
-    assert first.tier == settings.model
-    assert first.spec_draft["duration_s"] == 20, "500 s is not a scene"
-    assert first.spec_draft["word"] == "LATE AG", "only 7 chars of A-Z ! ? and space reach the facade"
-    assert first.interpretation.word == first.spec_draft["word"]
-
-    assert results[1].tier in ("library", "lexicon"), "a phrase the model skipped falls back locally"
-    assert results[2].tier == "blocked", "ok=false becomes a shrug"
-
-    assert arc.title == "THE WHO", "an over-long arc title is cut to what the marquee can climb"
-    assert arc.order[0] == 2 and sorted(arc.order) == [0, 1, 2], "a bad index is dropped, none are lost"
+    assert result.spec_draft["duration_s"] == 20, "500 s is not a scene"
+    assert result.spec_draft["word"] == "LATE AG", "only 7 chars of A-Z ! ? and space reach the facade"
+    assert result.interpretation.word == result.spec_draft["word"]
+    assert result.interpretation.theme == "place"
     assert latency >= 0
+
+
+def test_model_refusal_becomes_a_shrug(monkeypatch):
+    monkeypatch.setattr(settings, "api_key", "test-key")
+    monkeypatch.setattr(settings, "offline", False)
+    settings.set_llm(True)
+    monkeypatch.setattr(llm, "call_claude", lambda query, timeout=None: {"interpretation": {}, "spec": {"ok": False}})
+    result, tier, _ = llm.ingest("something unspeakable")
+    assert tier == "blocked" and result.spec_draft["title"] == "shrug"
 
 
 def test_api_failure_falls_through_to_local(monkeypatch):
     monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "offline", False)
     settings.set_llm(True)
-    monkeypatch.setattr(llm, "call_claude", lambda phrases, timeout=None: None)
+    monkeypatch.setattr(llm, "call_claude", lambda query, timeout=None: None)
 
-    results, arc, tier, _ = llm.ingest(FIVE)
-    assert tier == "local"
-    assert len(results) == 5
-    assert all(r.tier in ("library", "lexicon") for r in results)
+    result, tier, _ = llm.ingest("a rocket launch")
+    assert tier == "library"
+    assert result.spec_draft["word"] == "LIFTOFF"
+
+
+def test_blocked_query_never_reaches_the_api(monkeypatch):
+    monkeypatch.setattr(settings, "api_key", "test-key")
+    monkeypatch.setattr(settings, "offline", False)
+    settings.set_llm(True)
+
+    def explode(*a, **k):
+        raise AssertionError("a blocked query must not be sent to the API")
+
+    monkeypatch.setattr(llm, "call_claude", explode)
+    result, tier, _ = llm.ingest("i want to kill someone")
+    assert tier == "blocked"
 
 
 def test_llm_switch_off_skips_the_api(monkeypatch):
@@ -245,17 +258,46 @@ def test_llm_switch_off_skips_the_api(monkeypatch):
         raise AssertionError("the API must not be called with the switch off")
 
     monkeypatch.setattr(llm, "call_claude", explode)
-    _, _, tier, _ = llm.ingest(["anything at all"])
-    assert tier == "local"
+    _, tier, _ = llm.ingest("anything at all")
+    assert tier in ("library", "lexicon")
 
 
-def test_identical_batch_is_served_from_cache(client, with_stub_llm):
-    phrases = ["a cold morning", "the river froze", "one warm window"]
-    first = client.post("/api/ingest", json={"phrases": phrases}).json()
-    second = client.post("/api/ingest", json={"phrases": phrases}).json()
+def test_identical_query_is_served_from_cache(client, with_stub_llm):
+    first = client.post("/api/ingest", json={"query": "the green line"}).json()
+    second = client.post("/api/ingest", json={"query": "The Green Line!"}).json()
     assert first["tier"] == settings.model
     assert second["tier"].endswith("-cached")
-    assert second["results"][0]["spec_draft"] == first["results"][0]["spec_draft"]
+    assert second["result"]["spec_draft"] == first["result"]["spec_draft"]
+
+
+# --------------------------------------------------------------------------- the day's arc
+
+def test_arc_is_composed_over_the_day(client):
+    for query in ["a calm ocean", "lebron dunk", "a thunderstorm", "snow day"]:
+        assert client.post("/api/ingest", json={"query": query}).status_code == 200
+
+    body = client.get("/api/arc").json()
+    assert body["count"] >= 4
+    arc = body["arc"]
+    assert arc["title"] and len(arc["title"]) <= 7
+    assert arc["logline"] and arc["through_line"]
+    assert len(arc["order"]) == body["count"]
+    assert sorted(arc["order"]) == list(range(body["count"])), "every scene is placed once"
+    assert arc["order"][0] == 0, "the day opens on what was said first"
+
+
+def test_arc_orders_loud_in_the_middle_and_calm_at_the_end():
+    scenes = [fallback.local_result(q) for q in ["a calm ocean", "lebron dunk", "sunrise", "snow day"]]
+    arc = fallback.compose_arc(scenes)
+    arousal = [scenes[i].interpretation.mood.arousal for i in arc.order]
+    assert arc.order[0] == 0, "the night opens on whatever was said first"
+    assert arousal[1] == max(arousal[1:]), "the loudest thing lands right after the opening"
+    assert arousal[-1] == min(arousal[1:]), "the night settles into the calmest of the rest"
+
+
+def test_empty_day_has_an_empty_arc(client):
+    arc = fallback.compose_arc([])
+    assert arc.order == [] and arc.title == "DREAM"
 
 
 # --------------------------------------------------------------------------- operations
@@ -279,8 +321,8 @@ def test_admin_switch_rejects_nonsense(client):
 
 def test_ingest_token_is_enforced_when_set(client, monkeypatch):
     monkeypatch.setattr(settings, "ingest_token", "frontend-secret")
-    assert client.post("/api/ingest", json={"phrases": ["sunrise"]}).status_code == 401
-    ok = client.post("/api/ingest", json={"phrases": ["sunrise"]},
+    assert client.post("/api/ingest", json={"query": "sunrise"}).status_code == 401
+    ok = client.post("/api/ingest", json={"query": "sunrise"},
                      headers={"x-ingest-token": "frontend-secret"})
     assert ok.status_code == 200
 
@@ -288,8 +330,8 @@ def test_ingest_token_is_enforced_when_set(client, monkeypatch):
 def test_rate_limit_trips(client, monkeypatch):
     monkeypatch.setattr(settings, "rate_seconds", 60.0)
     ratelimit.reset()
-    assert client.post("/api/ingest", json={"phrases": ["first thing"]}).status_code == 200
-    second = client.post("/api/ingest", json={"phrases": ["second thing"]})
+    assert client.post("/api/ingest", json={"query": "first thing"}).status_code == 200
+    second = client.post("/api/ingest", json={"query": "second thing"})
     assert second.status_code == 429
     assert int(second.headers["retry-after"]) > 0
     assert second.json()["retry_after_s"] > 0
@@ -297,7 +339,7 @@ def test_rate_limit_trips(client, monkeypatch):
 
 def test_queue_cursor_advances(client):
     start = client.get("/api/queue").json()["cursor"]
-    posted = client.post("/api/ingest", json={"phrases": ["a lone pigeon"]}).json()
+    posted = client.post("/api/ingest", json={"query": "a lone pigeon"}).json()
 
     page = client.get(f"/api/queue?since={start}").json()
     ids = [row["id"] for row in page["submissions"]]
@@ -308,14 +350,15 @@ def test_queue_cursor_advances(client):
 
 
 def test_stored_record_keeps_the_review_flag(client):
-    posted = client.post("/api/ingest", json={"phrases": ["a lone seagull"], "source": "web"}).json()
+    posted = client.post("/api/ingest", json={"query": "a lone seagull", "source": "web"}).json()
     row = next(r for r in store.recent(limit=200) if r["id"] == posted["id"])
-    assert row["review"] == "pending", "remote submissions stay flagged for an operator"
+    assert row["review"] == "pending", "remote queries stay flagged for an operator"
     assert row["channel"] == "web" and row["priority"] == "dream"
+    assert row["result"]["query"] == "a lone seagull"
 
 
 def test_onsite_source_is_performed_live(client):
-    body = client.post("/api/ingest", json={"phrases": ["sunrise"], "source": "pedestal"}).json()
+    body = client.post("/api/ingest", json={"query": "sunrise", "source": "pedestal"}).json()
     assert body["priority"] == "live"
 
 
@@ -323,3 +366,8 @@ def test_health_and_index(client):
     assert client.get("/api/health").json()["ok"] is True
     assert client.get("/").json()["service"] == "greendream-llm"
     assert client.get("/api/library").json()["count"] == len(fallback.LIBRARY)
+
+
+def test_demo_page_is_served(client):
+    r = client.get("/demo")
+    assert r.status_code == 200 and "five words" in r.text

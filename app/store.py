@@ -1,8 +1,8 @@
-"""Append-only JSONL of everything accepted, plus a small phrase cache.
+"""Append-only JSONL of everything accepted, plus a small query cache.
 
 One file per local day, `data/YYYY-MM-DD.jsonl`, one line per submission. This is both the
-audit log (what was said, what we made of it, which tier answered) and the queue the pixel
-side reads with `GET /api/queue?since=`.
+audit log (what was said, what we made of it, which tier answered), the queue the pixel side
+reads with `GET /api/queue?since=`, and the day of scenes tonight's arc is composed from.
 
 `seq` is epoch milliseconds and increases within a process, so `since=<seq>` is a cursor a
 consumer can hold across restarts without any coordination.
@@ -77,7 +77,14 @@ def recent(since: int = 0, limit: int = 50, days: int = 2) -> List[Dict[str, Any
     return rows[-limit:] if limit else rows
 
 
-# --------------------------------------------------------------------------- phrase cache
+def today(limit: int = 0) -> List[Dict[str, Any]]:
+    """Everything said today, oldest first: the material tonight's dream is made from."""
+    rows = _read_day(date.today().isoformat())
+    rows.sort(key=lambda r: int(r.get("seq", 0)))
+    return rows[-limit:] if limit else rows
+
+
+# --------------------------------------------------------------------------- query cache
 
 def _cache_path() -> Path:
     return _dir() / "phrase_cache.json"
@@ -91,9 +98,9 @@ def _load_cache() -> Dict[str, Any]:
         return {}
 
 
-def cache_key(phrases: List[str]) -> str:
-    """Order-sensitive, punctuation-insensitive: the arc depends on the order."""
-    return "|".join(normalize(p) for p in phrases)
+def cache_key(query: str) -> str:
+    """Punctuation- and case-insensitive, so "a Rocket Launch!" hits "a rocket launch"."""
+    return normalize(query)
 
 
 def cache_get(key: str) -> Optional[Dict[str, Any]]:

@@ -84,8 +84,9 @@ class Settings:
         self.tz: str = os.environ.get("GD_TZ", "America/New_York").strip()
         self.rate_seconds: float = _float("GD_RATE_SECONDS", 20.0)
         self.rate_per_hour: int = _int("GD_RATE_PER_HOUR", 20)
-        self.max_phrases: int = _int("GD_MAX_PHRASES", 5)
-        self.max_phrase_chars: int = _int("GD_MAX_PHRASE_CHARS", 120)
+        # One submission is one thing to show, said in at most this many words.
+        self.max_words: int = _int("GD_MAX_WORDS", 5)
+        self.max_chars: int = _int("GD_MAX_CHARS", 60)
         self.data_dir: Path = Path(os.environ.get("GD_DATA_DIR", str(ROOT / "data")))
         self.offline: bool = _bool("GD_OFFLINE", False)  # skip every outbound request
 

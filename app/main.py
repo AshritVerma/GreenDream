@@ -1,8 +1,9 @@
-"""The API. Five phrases in, five validated scene drafts and one arc out.
+"""The API. One query of up to five words in, one validated scene draft out.
 
     POST /api/ingest         the only write. 423 with a "dreaming" body when the gate is shut.
     GET  /api/state          what the frontend polls: phase, whether it may submit, live view.
-    GET  /api/queue?since=   what the pixel side reads: accepted submissions, oldest first.
+    GET  /api/queue?since=   what the pixel side reads: accepted scenes, oldest first.
+    GET  /api/arc            the day's scenes read as one story, to seed tonight's dream.
     POST /api/admin/switch   the off switches: the Claude tier and the intake gate.
     GET  /api/health         liveness.
 
@@ -23,7 +24,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from . import fallback, gate, llm, ratelimit, store, sun
 from .demo import DEMO_PAGE
 from .config import settings
-from .models import (Arc, GateInfo, IngestRequest, IngestResponse, PhraseResult,
+from .models import (ArcResponse, GateInfo, IngestRequest, IngestResponse, SceneResult,
                      StateResponse, SwitchRequest)
 
 SUN_REFRESH_S = 1800.0
@@ -100,7 +101,8 @@ def index() -> Dict[str, Any]:
         "service": "greendream-llm",
         "accepting": g["accepting"],
         "phase": g["phase"],
-        "endpoints": ["POST /api/ingest", "GET /api/state", "GET /api/queue", "POST /api/admin/switch", "GET /api/health"],
+        "endpoints": ["POST /api/ingest", "GET /api/state", "GET /api/queue", "GET /api/arc",
+                      "POST /api/admin/switch", "GET /api/health"],
         "demo": "/demo",
         "docs": "/docs",
     }
@@ -128,7 +130,7 @@ def state() -> StateResponse:
         llm_enabled=settings.llm_available,
         tier=settings.model if settings.llm_available else "local",
         live_view_url=settings.live_view_url,
-        max_phrases=settings.max_phrases, max_phrase_chars=settings.max_phrase_chars,
+        max_words=settings.max_words, max_chars=settings.max_chars,
     )
 
 
@@ -143,47 +145,61 @@ def ingest(req: IngestRequest, request: Request):
         return JSONResponse(
             status_code=429,
             headers={"Retry-After": str(retry_after)},
-            content={"state": "too_many", "message": "one submission at a time; the tower is listening to someone else.",
+            content={"state": "too_many", "message": "one at a time; the tower is listening to someone else.",
                      "retry_after_s": retry_after},
         )
 
-    phrases = req.phrases[: settings.max_phrases]
-    key = store.cache_key(phrases)
+    key = store.cache_key(req.query)
     cached = store.cache_get(key)
     if cached:
-        results = [PhraseResult(**r) for r in cached["results"]]
-        arc = Arc(**cached["arc"])
+        result = SceneResult(**cached["result"])
         tier, latency_ms = f"{cached['tier']}-cached", 0
     else:
-        results, arc, tier, latency_ms = llm.ingest(phrases)
-        if tier not in ("local", "blocked"):
-            store.cache_put(key, {"results": [r.model_dump() for r in results],
-                                  "arc": arc.model_dump(), "tier": tier})
+        result, tier, latency_ms = llm.ingest(req.query)
+        if tier not in ("library", "lexicon", "blocked"):
+            store.cache_put(key, {"result": result.model_dump(), "tier": tier})
 
     priority = priority_for(req.source)
     payload = IngestResponse(
         id=uuid.uuid4().hex[:12], seq=store.next_seq(), received_at=str(g["now"]),
         tier=tier, latency_ms=latency_ms, channel=req.source, priority=priority,
         gate=GateInfo(mode=str(g["mode"]), phase=str(g["phase"]), accepting=True, reason=str(g["reason"])),
-        results=results, arc=arc,
+        result=result,
     )
 
     record = payload.model_dump()
     record["session_id"] = req.session_id
-    # Remote submissions are dream material and stay flagged for review; the composer can
-    # skip anything unapproved without us losing it.
+    # Remote queries are dream material and stay flagged for review; the composer can skip
+    # anything unapproved without us losing it.
     record["review"] = "pending" if priority == "dream" else "auto"
-    record["blocked_count"] = sum(1 for r in results if r.tier == "blocked")
     store.append(record)
     return payload
 
 
 @app.get("/api/queue")
 def queue(since: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500)) -> Dict[str, Any]:
-    """Accepted submissions for the pixel side. Hold `cursor` and pass it back as `since`."""
+    """Accepted scenes for the pixel side. Hold `cursor` and pass it back as `since`."""
     rows: List[Dict[str, Any]] = store.recent(since=since, limit=limit)
     cursor = max([int(r.get("seq", 0)) for r in rows], default=since)
     return {"cursor": cursor, "count": len(rows), "submissions": rows}
+
+
+@app.get("/api/arc", response_model=ArcResponse)
+def arc(limit: int = Query(40, ge=1, le=200)) -> ArcResponse:
+    """Everything said today, read as one story. This is what seeds tonight's dream.
+
+    A single query is one scene; the arc only exists at the scale of a day, so it lives here
+    rather than in the ingest response.
+    """
+    scenes: List[SceneResult] = []
+    for row in store.today(limit=limit):
+        try:
+            scenes.append(SceneResult(**row["result"]))
+        except (KeyError, TypeError, ValueError):
+            continue  # an older or torn line should not break the arc
+    live = [s for s in scenes if s.ok]
+    return ArcResponse(count=len(live), scenes=[s.query for s in live],
+                       arc=fallback.compose_arc(scenes))
 
 
 @app.post("/api/admin/switch", dependencies=[Depends(require_admin_token)])

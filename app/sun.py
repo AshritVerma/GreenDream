@@ -16,11 +16,17 @@ import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Optional
 
-from .config import ROOT, settings
+from .config import settings
 
-CACHE_PATH = ROOT / "sun_cache.json"
+
+def cache_path() -> Path:
+    """Beside the data, not in the repo: two instances with different coordinates must not
+    overwrite each other's table, and the tests must not read a stale one."""
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    return settings.data_dir / "sun_cache.json"
 
 # Late-September Cambridge, so an offline host is at most a few minutes wrong.
 SAMPLE: Dict[str, object] = {
@@ -71,7 +77,7 @@ def fetch(timeout: float = 6.0) -> Optional[Dict[str, object]]:
         print(f"[sun] fetch failed ({type(e).__name__}: {e})", flush=True)
         return None
     try:
-        CACHE_PATH.write_text(json.dumps(out), encoding="utf-8")
+        cache_path().write_text(json.dumps(out), encoding="utf-8")
     except OSError:
         pass
     return out
@@ -79,7 +85,7 @@ def fetch(timeout: float = 6.0) -> Optional[Dict[str, object]]:
 
 def cached() -> Dict[str, object]:
     try:
-        data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(cache_path().read_text(encoding="utf-8"))
         if data.get("sunrise") and data.get("sunset"):
             data["source"] = "cache"
             return data
@@ -117,15 +123,27 @@ def local_now(state: Optional[Dict[str, object]] = None) -> datetime:
     return (datetime.now(timezone.utc) + timedelta(seconds=offset)).replace(tzinfo=None)
 
 
+def _same_time_today(when: datetime, now: datetime) -> datetime:
+    """Move a stale sunrise/sunset onto today, keeping its time of day.
+
+    A table from another date (the bundled sample, or a cache written weeks ago) is still
+    roughly right about *when* the sun sets. Without this, a stale table reads as permanent
+    night and the gate never opens.
+    """
+    return now.replace(hour=when.hour, minute=when.minute, second=0, microsecond=0)
+
+
 def _today_pair(state: Dict[str, object], now: datetime):
-    """Today's sunrise/sunset, and tomorrow's sunrise if the table has it."""
+    """Today's sunrise and sunset, plus the next sunrise after `now`."""
     rises = [d for d in (_parse(s) for s in state.get("sunrise", [])) if d]
     sets = [d for d in (_parse(s) for s in state.get("sunset", [])) if d]
-    rise = next((d for d in rises if d.date() == now.date()), rises[0] if rises else None)
-    dusk = next((d for d in sets if d.date() == now.date()), sets[0] if sets else None)
-    next_rise = next((d for d in rises if d > now), None)
-    if next_rise is None and rise is not None:
-        next_rise = rise + timedelta(days=1)  # no tomorrow in the table: assume the same time
+    if not rises or not sets:
+        return None, None, None
+
+    rise = next((d for d in rises if d.date() == now.date()), _same_time_today(rises[0], now))
+    dusk = next((d for d in sets if d.date() == now.date()), _same_time_today(sets[0], now))
+    next_rise = next((d for d in rises if d > now), None) or (
+        rise if rise > now else rise + timedelta(days=1))
     return rise, dusk, next_rise
 
 

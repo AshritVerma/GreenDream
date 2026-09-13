@@ -1,8 +1,9 @@
 """A single self-contained page for trying the API by hand, served at /demo.
 
-Not the product frontend: it is the operator's bench. Five inputs, the gate banner, the two
-switches, and the full response laid out field by field. No build step, no dependencies, no
-framework, so it cannot rot separately from the API it exercises.
+Not the product frontend: it is the operator's bench. One query box with a word counter, the
+gate banner, the two switches, the resulting draft field by field, and the day's arc.
+No build step, no dependencies, no framework, so it cannot rot separately from the API it
+exercises.
 
 It shows palette swatches and the sprite silhouette because those are draft *fields* worth
 reading. It is not a facade renderer; nothing here pretends to be the building.
@@ -25,7 +26,7 @@ DEMO_PAGE = """<!doctype html>
   body { margin: 0; background: var(--bg); color: var(--ink);
          font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
   a { color: var(--accent); }
-  .wrap { max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px 20px 80px; }
   h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; letter-spacing: .2px; }
   .sub { color: var(--dim); margin: 0 0 22px; font-size: 14px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 18px; }
@@ -40,22 +41,21 @@ DEMO_PAGE = """<!doctype html>
   input[type=text], input[type=password], select {
     width: 100%; background: #0a0f19; color: var(--ink); border: 1px solid var(--line);
     border-radius: 8px; padding: 10px 12px; font: inherit; }
+  #q { font-size: 20px; padding: 14px 16px; letter-spacing: .3px; }
   input:focus, select:focus { outline: none; border-color: #33507a; }
-  .rows { display: grid; gap: 8px; }
-  .row { display: flex; gap: 10px; align-items: center; }
-  .row span.n { color: var(--dim); width: 16px; text-align: right; font-variant-numeric: tabular-nums; }
-  .actions { display: flex; gap: 12px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+  .count { font-variant-numeric: tabular-nums; }
+  .count.over { color: var(--bad); }
+  .actions { display: flex; gap: 12px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
   button { background: var(--accent); color: #04150c; border: 0; border-radius: 8px;
            padding: 10px 18px; font: inherit; font-weight: 650; cursor: pointer; }
   button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  button.tiny { padding: 3px 9px; font-size: 12px; font-weight: 500; }
   button:disabled { opacity: .45; cursor: not-allowed; }
   .ops { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
   .ops > div { flex: 1 1 130px; }
-  .cards { display: grid; gap: 12px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
-          display: grid; grid-template-columns: 1fr auto; gap: 14px; }
-  .card h3 { margin: 0 0 2px; font-size: 16px; font-weight: 620; }
-  .phrase { color: var(--dim); font-size: 13px; font-style: italic; margin: 0 0 10px; }
+  .scene { display: grid; grid-template-columns: 1fr auto; gap: 18px; }
+  .scene h2 { margin: 0 0 2px; font-size: 20px; font-weight: 620; }
+  .said { color: var(--dim); font-size: 13px; font-style: italic; margin: 0 0 10px; }
   .badge { display: inline-block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
            border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; color: var(--dim); }
   .badge.model { color: var(--accent); border-color: #1e4a35; }
@@ -64,17 +64,19 @@ DEMO_PAGE = """<!doctype html>
   .kv div:nth-child(odd) { color: var(--dim); }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 0; }
   .chip { background: #0a0f19; border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; font-size: 12px; }
+  .chip.try { cursor: pointer; }
+  .chip.try:hover { border-color: #33507a; color: var(--accent); }
   .side { display: grid; gap: 10px; justify-items: center; align-content: start; }
   .swatches { display: flex; gap: 4px; }
-  .sw { width: 22px; height: 22px; border-radius: 5px; border: 1px solid rgba(255,255,255,.14); }
-  .sprite { display: grid; grid-template-columns: repeat(9, 7px); gap: 1px; }
-  .sprite i { width: 7px; height: 7px; border-radius: 1px; background: #131a27; }
-  .bar { width: 120px; height: 5px; background: #131a27; border-radius: 3px; overflow: hidden; }
+  .sw { width: 24px; height: 24px; border-radius: 5px; border: 1px solid rgba(255,255,255,.14); }
+  .sprite { display: grid; grid-template-columns: repeat(9, 9px); gap: 1px; }
+  .sprite i { width: 9px; height: 9px; border-radius: 1px; background: #131a27; }
+  .bar { width: 130px; height: 5px; background: #131a27; border-radius: 3px; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); }
   .arc { border-left: 3px solid var(--accent); }
   .arc h2 { margin: 0 0 4px; font-size: 18px; letter-spacing: .1em; }
   pre { background: #060910; border: 1px solid var(--line); border-radius: 10px; padding: 12px;
-        overflow: auto; max-height: 380px; font-size: 12px; color: #9fb0cd; }
+        overflow: auto; max-height: 340px; font-size: 12px; color: #9fb0cd; }
   .err { color: var(--bad); }
   .hide { display: none; }
 </style>
@@ -82,8 +84,8 @@ DEMO_PAGE = """<!doctype html>
 <body>
 <div class="wrap">
   <h1>Tell the building what you want to see</h1>
-  <p class="sub">Five phrases. Each one comes back as an interpretation and a scene draft.
-     Nothing is rendered here &mdash; this is the language half.</p>
+  <p class="sub">One thing, in up to five words. It comes back as an interpretation and one
+     scene draft. Nothing is rendered here &mdash; this is the language half.</p>
 
   <div class="panel banner" id="banner">
     <span class="dot" id="dot"></span>
@@ -93,14 +95,17 @@ DEMO_PAGE = """<!doctype html>
   </div>
 
   <div class="panel">
-    <label class="small">your five phrases</label>
-    <div class="rows" id="rows"></div>
+    <label class="small">your five words</label>
+    <input type="text" id="q" maxlength="60" placeholder="a rocket launch" autocomplete="off">
     <div class="actions">
-      <button id="send">Send to the building</button>
-      <button class="ghost" id="fill">Fill with examples</button>
+      <button id="send">Show me</button>
+      <span class="meta count" id="count">0 / 5 words</span>
       <span class="meta" id="status"></span>
     </div>
+    <div class="chips" id="tries"></div>
   </div>
+
+  <div id="out"></div>
 
   <div class="panel">
     <label class="small">operator switches</label>
@@ -131,7 +136,11 @@ DEMO_PAGE = """<!doctype html>
     <p class="meta" id="opsmsg" style="margin:10px 0 0"></p>
   </div>
 
-  <div id="out"></div>
+  <div class="panel">
+    <label class="small">tonight's dream, from everything said today
+      <button class="ghost tiny" id="arcbtn" style="margin-left:8px">refresh</button></label>
+    <div id="arcout" class="meta">nothing yet today</div>
+  </div>
 
   <div class="panel hide" id="rawpanel">
     <label class="small">raw response</label>
@@ -140,31 +149,40 @@ DEMO_PAGE = """<!doctype html>
 </div>
 
 <script>
-const EXAMPLES = [
-  "a thunderstorm over the river",
-  "my heart is racing",
-  "a rocket launch",
-  "the first snow day",
-  "i miss my dog"
-];
-const rows = document.getElementById('rows');
-for (let i = 0; i < 5; i++) {
-  const row = document.createElement('div');
-  row.className = 'row';
-  row.innerHTML = `<span class="n">${i + 1}</span><input type="text" maxlength="120" placeholder="${EXAMPLES[i]}">`;
-  rows.appendChild(row);
+const TRIES = ["a thunderstorm", "my heart is racing", "a rocket launch", "the first snow",
+               "lebron dunk", "take me to space", "finals week", "the T is late"];
+const q = document.getElementById('q');
+const tries = document.getElementById('tries');
+for (const t of TRIES) {
+  const chip = document.createElement('span');
+  chip.className = 'chip try';
+  chip.textContent = t;
+  chip.onclick = () => { q.value = t; count(); q.focus(); };
+  tries.appendChild(chip);
 }
-const inputs = [...rows.querySelectorAll('input')];
 
-function phrases() {
-  return inputs.map(i => i.value.trim()).filter(Boolean);
+let MAXW = 5;
+
+function words() {
+  return q.value.trim().split(/\\s+/).filter(Boolean);
 }
+
+function count() {
+  const n = words().length;
+  const el = document.getElementById('count');
+  el.textContent = `${n} / ${MAXW} words`;
+  el.className = 'meta count' + (n > MAXW ? ' over' : '');
+}
+q.addEventListener('input', count);
+q.addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('send').click(); });
 
 async function refreshState() {
   try {
     const s = await (await fetch('/api/state')).json();
-    const dot = document.getElementById('dot');
-    dot.className = 'dot ' + (s.accepting ? 'open' : 'shut');
+    MAXW = s.max_words;
+    q.maxLength = s.max_chars;
+    count();
+    document.getElementById('dot').className = 'dot ' + (s.accepting ? 'open' : 'shut');
     document.getElementById('bmsg').textContent = s.message;
     document.getElementById('bmeta').textContent =
       `${s.phase} · ${s.now.replace('T', ' ')} · sunset ${(s.sunset || '?').slice(11, 16)} · ` +
@@ -182,43 +200,48 @@ async function refreshState() {
 }
 
 function spriteGrid(sprite, palette) {
+  if (!sprite || !sprite.rows.length) return null;
   const box = document.createElement('div');
   box.className = 'sprite';
-  const rows = sprite ? sprite.rows : [];
-  const lit = sprite ? (sprite.color || palette.glow) : null;
-  for (const row of rows) {
+  const lit = sprite.color || palette.glow;
+  for (const row of sprite.rows) {
     for (const ch of row) {
       const cell = document.createElement('i');
       if (ch === '#') cell.style.background = lit;
       box.appendChild(cell);
     }
   }
-  return rows.length ? box : null;
+  return box;
 }
 
-function card(r) {
-  const d = r.spec_draft, it = r.interpretation;
-  const el = document.createElement('div');
-  el.className = 'card';
+function render(body) {
+  const r = body.result, d = r.spec_draft, it = r.interpretation;
+  const out = document.getElementById('out');
+  out.innerHTML = '';
 
+  const panel = document.createElement('div');
+  panel.className = 'panel scene';
   const tierClass = r.tier === 'blocked' ? 'blocked'
                   : (r.tier === 'library' || r.tier === 'lexicon') ? '' : 'model';
+
   const left = document.createElement('div');
   left.innerHTML = `
-    <h3>${it.title || d.title}</h3>
-    <p class="phrase">&ldquo;${r.phrase.replace(/</g, '&lt;')}&rdquo;</p>
+    <h2>${it.title || d.title}</h2>
+    <p class="said">&ldquo;${r.query.replace(/</g, '&lt;')}&rdquo; &middot; ${r.words.length} words</p>
     <span class="badge ${tierClass}">${r.tier}</span>
     <span class="badge">${it.theme}</span>
-    ${d.word ? `<span class="badge">word ${d.word}</span>` : ''}
+    ${d.word ? `<span class="badge">shows ${d.word}</span>` : '<span class="badge">no text</span>'}
     <div class="chips">${(it.keywords || []).map(k => `<span class="chip">${k}</span>`).join('')}</div>
-    <div class="kv" style="margin-top:10px">
+    <div class="kv" style="margin-top:12px">
       <div>world</div><div>${d.world}</div>
       <div>motion</div><div>${d.motion.kind} · speed ${d.motion.speed.toFixed(2)} · amount ${d.motion.amount.toFixed(2)}</div>
       <div>particles</div><div>${d.particles.kind}${d.particles.kind === 'none' ? '' : ` · ${d.particles.density.toFixed(2)} ${d.particles.direction}`}</div>
       <div>flash</div><div>${d.flash.kind}${d.flash.kind === 'none' ? '' : ` · ${d.flash.rate.toFixed(2)}`}</div>
       <div>tempo</div><div>${Math.round(d.tempo_bpm)} bpm · ${d.duration_s}s</div>
       <div>notes</div><div>${it.notes || '&mdash;'}</div>
-    </div>`;
+    </div>
+    <p class="meta" style="margin:12px 0 0">answered by ${body.tier} in ${body.latency_ms} ms ·
+       ${body.channel} · priority ${body.priority}</p>`;
 
   const side = document.createElement('div');
   side.className = 'side';
@@ -242,50 +265,46 @@ function card(r) {
     <div class="bar"><i style="width:${it.mood.arousal * 100}%"></i></div>`;
   side.appendChild(bars);
 
-  el.appendChild(left);
-  el.appendChild(side);
-  return el;
-}
-
-function render(body) {
-  const out = document.getElementById('out');
-  out.innerHTML = '';
-
-  const arc = document.createElement('div');
-  arc.className = 'panel arc';
-  arc.innerHTML = `
-    <h2>${body.arc.title}</h2>
-    <p style="margin:0 0 8px">${body.arc.logline}</p>
-    <p class="meta" style="margin:0">${body.arc.through_line}</p>
-    <div class="chips">${body.arc.order.map((i, n) =>
-      `<span class="chip">${n + 1}. phrase ${i + 1}</span>`).join('')}</div>
-    <p class="meta" style="margin:10px 0 0">tier ${body.tier} · ${body.latency_ms} ms ·
-       ${body.channel} · priority ${body.priority}</p>`;
-  out.appendChild(arc);
-
-  const cards = document.createElement('div');
-  cards.className = 'cards';
-  body.results.forEach(r => cards.appendChild(card(r)));
-  out.appendChild(cards);
+  panel.appendChild(left);
+  panel.appendChild(side);
+  out.appendChild(panel);
 
   document.getElementById('rawpanel').className = 'panel';
   document.getElementById('raw').textContent = JSON.stringify(body, null, 2);
 }
 
-document.getElementById('fill').onclick = () => {
-  inputs.forEach((el, i) => el.value = EXAMPLES[i]);
-};
+async function refreshArc() {
+  const el = document.getElementById('arcout');
+  try {
+    const a = await (await fetch('/api/arc')).json();
+    if (!a.count) { el.className = 'meta'; el.textContent = 'nothing yet today'; return; }
+    el.className = '';
+    el.innerHTML = `
+      <div class="arc" style="padding-left:12px">
+        <h2>${a.arc.title}</h2>
+        <p style="margin:0 0 6px">${a.arc.logline}</p>
+        <p class="meta" style="margin:0">${a.arc.through_line}</p>
+        <div class="chips">${a.arc.order.map((i, n) =>
+          `<span class="chip">${n + 1}. ${a.scenes[i] || '?'}</span>`).join('')}</div>
+      </div>`;
+  } catch (e) {
+    el.className = 'meta err';
+    el.textContent = String(e);
+  }
+}
+document.getElementById('arcbtn').onclick = refreshArc;
 
 document.getElementById('send').onclick = async () => {
-  const list = phrases();
   const status = document.getElementById('status');
-  if (!list.length) { status.innerHTML = '<span class="err">say at least one thing</span>'; return; }
+  const list = words();
+  if (!list.length) { status.innerHTML = '<span class="err">say something</span>'; return; }
+  if (list.length > MAXW) { status.innerHTML = `<span class="err">${MAXW} words at most</span>`; return; }
   status.textContent = 'the tower is thinking\\u2026';
   document.getElementById('send').disabled = true;
   try {
     const res = await fetch('/api/ingest', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ phrases: list, source: 'web' })
+      body: JSON.stringify({ query: q.value.trim(), source: 'web' })
     });
     const body = await res.json();
     if (res.status === 423) {
@@ -294,10 +313,12 @@ document.getElementById('send').onclick = async () => {
       document.getElementById('raw').textContent = JSON.stringify(body, null, 2);
       document.getElementById('out').innerHTML = '';
     } else if (!res.ok) {
-      status.innerHTML = `<span class="err">${res.status}: ${body.detail || body.message || 'rejected'}</span>`;
+      const why = body.detail ? (body.detail[0] ? body.detail[0].msg : body.detail) : (body.message || 'rejected');
+      status.innerHTML = `<span class="err">${res.status}: ${why}</span>`;
     } else {
-      status.textContent = `answered by ${body.tier} in ${body.latency_ms} ms`;
+      status.textContent = '';
       render(body);
+      refreshArc();
     }
   } catch (e) {
     status.innerHTML = `<span class="err">${e}</span>`;
@@ -327,6 +348,7 @@ document.getElementById('flip').onclick = async () => {
 };
 
 refreshState();
+refreshArc();
 setInterval(refreshState, 20000);
 </script>
 </body>

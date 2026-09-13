@@ -1,5 +1,8 @@
 """Request and response shapes. These are the contract the frontend builds against.
 
+One submission is one thing to show: a query of at most five words, in, and one scene draft
+out. Five words is the whole budget for the idea, not five separate ideas.
+
 `spec_draft` is deliberately a plain dict: `spec.validate()` already guarantees its shape,
 and keeping it unmodelled here means the scene vocabulary can grow on the renderer side
 without a second schema to keep in sync.
@@ -21,7 +24,7 @@ class Mood(BaseModel):
 
 
 class Interpretation(BaseModel):
-    """What the phrase means, before anyone decides how to draw it."""
+    """What the query means, before anyone decides how to draw it."""
 
     title: str = Field("", max_length=60, description="2-4 words: what would be shown")
     theme: str = Field("", max_length=40, description="one-word family: weather, feeling, place, object, event")
@@ -32,23 +35,15 @@ class Interpretation(BaseModel):
     notes: str = Field("", max_length=280)
 
 
-class PhraseResult(BaseModel):
-    index: int
-    phrase: str
+class SceneResult(BaseModel):
+    """One query, one thing the building would become."""
+
+    query: str
+    words: List[str] = Field(default_factory=list)
     ok: bool = True
     tier: str = Field(..., description="the model id, 'library', 'lexicon', or 'blocked'")
     interpretation: Interpretation
     spec_draft: Dict[str, Any]
-
-
-class Arc(BaseModel):
-    """The five phrases read as one story, shaped to seed a dream script later."""
-
-    title: str = Field("DREAM", description="<=7 chars, A-Z ! ? only")
-    logline: str = Field("", max_length=280)
-    order: List[int] = Field(default_factory=list, description="phrase indices in performance order")
-    through_line: str = Field("", max_length=140)
-    palette: Dict[str, str] = Field(default_factory=dict)
 
 
 class GateInfo(BaseModel):
@@ -59,24 +54,21 @@ class GateInfo(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    phrases: List[str] = Field(..., min_length=1, max_length=5)
+    query: str = Field(..., description="the one thing to show, in at most five words")
     source: str = Field("web", max_length=32)
     session_id: Optional[str] = Field(None, max_length=64)
 
-    @field_validator("phrases")
+    @field_validator("query")
     @classmethod
-    def _clean(cls, v: List[str]) -> List[str]:
-        out: List[str] = []
-        for raw in v:
-            if not isinstance(raw, str):
-                continue
-            text = re.sub(r"[\x00-\x1f\x7f]", " ", raw)
-            text = re.sub(r"\s+", " ", text).strip()[: settings.max_phrase_chars]
-            if text:
-                out.append(text)
-        if not out:
-            raise ValueError("at least one non-empty phrase is required")
-        return out
+    def _clean(cls, v: str) -> str:
+        text = re.sub(r"[\x00-\x1f\x7f]", " ", str(v))
+        text = re.sub(r"\s+", " ", text).strip()[: settings.max_chars]
+        if not text:
+            raise ValueError("say something")
+        words = text.split(" ")
+        if len(words) > settings.max_words:
+            raise ValueError(f"at most {settings.max_words} words; got {len(words)}")
+        return text
 
     @field_validator("source")
     @classmethod
@@ -88,12 +80,31 @@ class IngestResponse(BaseModel):
     id: str
     seq: int
     received_at: str
-    tier: str = Field(..., description="the tier that answered the batch")
+    tier: str = Field(..., description="the tier that answered")
     latency_ms: int
-    channel: str = Field("web", description="where the phrases came from")
+    channel: str = Field("web", description="where the query came from")
     priority: str = Field("dream", description="'dream' = remote, dream material only; 'live' = on-site")
     gate: GateInfo
-    results: List[PhraseResult]
+    result: SceneResult
+
+
+class Arc(BaseModel):
+    """A day of queries read as one story, shaped to seed a dream script.
+
+    Not part of a submission: it is composed over everything said today, which is the only
+    scale at which an arc means anything.
+    """
+
+    title: str = Field("DREAM", description="<=7 chars, A-Z ! ? only")
+    logline: str = Field("", max_length=280)
+    order: List[int] = Field(default_factory=list, description="indices into `scenes`, in performance order")
+    through_line: str = Field("", max_length=140)
+    palette: Dict[str, str] = Field(default_factory=dict)
+
+
+class ArcResponse(BaseModel):
+    count: int
+    scenes: List[str] = Field(default_factory=list, description="the queries, in the order they were said")
     arc: Arc
 
 
@@ -114,8 +125,8 @@ class StateResponse(BaseModel):
     llm_enabled: bool = False
     tier: str = "local"
     live_view_url: str = ""
-    max_phrases: int = 5
-    max_phrase_chars: int = 120
+    max_words: int = 5
+    max_chars: int = 60
 
 
 class SwitchRequest(BaseModel):

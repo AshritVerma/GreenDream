@@ -54,16 +54,16 @@ def main() -> None:
 
         subs: List[Dict[str, Any]] = page.get("submissions", [])
         for sub in subs:
-            for result in sub.get("results", []):
-                if not result.get("ok"):
-                    continue
-                body = {"type": "text", "text": result["phrase"], "source": sub.get("channel", "web")}
-                try:
-                    post_json(f"{args.target}/input", body)
-                    print(f"[push] {result['phrase']!r} -> {args.target}", flush=True)
-                except Exception as e:
-                    print(f"[push] send failed: {e}", flush=True)
-                time.sleep(0.2)  # let the tower finish one scene before the next arrives
+            result = sub.get("result") or {}
+            if not result.get("ok"):
+                continue
+            body = {"type": "text", "text": result["query"], "source": sub.get("channel", "web")}
+            try:
+                post_json(f"{args.target}/input", body)
+                print(f"[push] {result['query']!r} -> {args.target}", flush=True)
+            except Exception as e:
+                print(f"[push] send failed: {e}", flush=True)
+            time.sleep(0.2)  # let the tower finish one scene before the next arrives
         cursor = int(page.get("cursor", cursor))
 
         if args.once:

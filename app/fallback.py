@@ -1,15 +1,14 @@
-"""The local tier: phrases to scene drafts with no network, no key, no API bill.
+"""The local tier: a query to a scene draft with no network, no key, no API bill.
 
-Two stages, both deterministic (same phrase in, same draft out, in any process):
+Two stages, both deterministic (same query in, same draft out, in any process):
 
     1. warm library  12 hand-written scenes plus aliases and a fuzzy match. These are the
-                     phrases people actually say, and they are also the reference specs the
-                     model is shown, so the two tiers agree on what "good" looks like.
+                     things people actually ask for, and they are also the reference specs
+                     the model is shown, so the two tiers agree on what "good" looks like.
     2. lexicon       valence/arousal from a small affect table, mapped to palette, motion,
                      particles and tempo. Always answers something.
 
-This module is also the moderation gate (`BLOCKLIST`) and the arc composer that both tiers
-use when the model does not supply one.
+This module is also the moderation gate (`BLOCKLIST`) and the day-level arc composer.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import re
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from . import spec as spec_mod
-from .models import Arc, Interpretation, Mood, PhraseResult
+from .models import Arc, Interpretation, Mood, SceneResult
 
 # --------------------------------------------------------------------------- sprites
 
@@ -159,7 +158,7 @@ def normalize(text: str) -> str:
     return re.sub(r"[^a-z' ]", " ", text.lower()).strip()
 
 
-def lookup(text: str, cutoff: float = 0.72) -> Optional[Tuple[str, dict]]:
+def lookup(text: str, cutoff: float = 0.7) -> Optional[Tuple[str, dict]]:
     """Instant answers: exact, then alias word, then alias phrase, then fuzzy."""
     q = re.sub(r"\s+", " ", normalize(text))
     if not q:
@@ -259,9 +258,13 @@ def is_blocked(text: str) -> bool:
     return bool(BLOCKLIST.search(text))
 
 
-def blocked_result(index: int, phrase: str) -> PhraseResult:
-    return PhraseResult(
-        index=index, phrase=phrase, ok=False, tier="blocked",
+def words_of(query: str) -> List[str]:
+    return [w for w in query.split(" ") if w]
+
+
+def blocked_result(query: str) -> SceneResult:
+    return SceneResult(
+        query=query, words=words_of(query), ok=False, tier="blocked",
         interpretation=Interpretation(title="not shown", theme="blocked", keywords=[], word="HMM?",
                                       mood=Mood(valence=0.0, arousal=0.2), recognizability=0.0,
                                       notes="blocked by the local content filter"),
@@ -271,12 +274,12 @@ def blocked_result(index: int, phrase: str) -> PhraseResult:
 
 # --------------------------------------------------------------------------- the local tier
 
-def local_result(index: int, phrase: str) -> PhraseResult:
-    """One phrase to one validated draft, offline. Library hit if we have one, else lexicon."""
-    if is_blocked(phrase):
-        return blocked_result(index, phrase)
+def local_result(query: str) -> SceneResult:
+    """One query to one validated draft, offline. Library hit if we have one, else lexicon."""
+    if is_blocked(query):
+        return blocked_result(query)
 
-    hit = lookup(phrase)
+    hit = lookup(query)
     if hit is not None:
         key, entry = hit
         draft = spec_mod.validate(entry["spec"])
@@ -286,10 +289,10 @@ def local_result(index: int, phrase: str) -> PhraseResult:
             mood=Mood(valence=draft["mood"]["valence"], arousal=draft["mood"]["arousal"]),
             recognizability=0.9, notes=f"warm library match: {key}",
         )
-        return PhraseResult(index=index, phrase=phrase, ok=True, tier="library",
-                            interpretation=interp, spec_draft=draft)
+        return SceneResult(query=query, words=words_of(query), ok=True, tier="library",
+                           interpretation=interp, spec_draft=draft)
 
-    affect = lexicon_affect(phrase)
+    affect = lexicon_affect(query)
     v = float(affect["valence"])
     ar = float(affect["arousal"])
     emotion = str(affect["emotion"])
@@ -310,44 +313,47 @@ def local_result(index: int, phrase: str) -> PhraseResult:
     })
     interp = Interpretation(
         title=emotion, theme=EMOTION_THEME.get(emotion, "feeling"),
-        keywords=keywords_of(phrase), word=draft["word"],
+        keywords=keywords_of(query), word=draft["word"],
         mood=Mood(valence=v, arousal=ar),
         recognizability=0.35 if affect["matched"] else 0.2,
         notes="lexicon fallback: mood only, no depiction",
     )
-    return PhraseResult(index=index, phrase=phrase, ok=True, tier="lexicon",
-                        interpretation=interp, spec_draft=draft)
+    return SceneResult(query=query, words=words_of(query), ok=True, tier="lexicon",
+                       interpretation=interp, spec_draft=draft)
 
 
-def compose_arc(results: Sequence[PhraseResult]) -> Arc:
-    """Order the batch as a small story: as-said opening, loudest middle, calmest close.
+# --------------------------------------------------------------------------- the day's arc
 
-    Same shape the dream composer wants, so tonight's script can start from it.
+def compose_arc(scenes: Sequence[SceneResult]) -> Arc:
+    """Read a day of scenes as one story: as-said opening, loudest middle, calmest close.
+
+    A single query has no arc; a day of them does. This is the seed the dream composer wants,
+    and `order` indexes into the list it was given, oldest first.
     """
-    live = [r for r in results if r.ok] or list(results)
-    idx = [r.index for r in live]
-    by_index = {r.index: r for r in live}
+    live = [s for s in scenes if s.ok] or list(scenes)
+    if not live:
+        return Arc(title="DREAM", logline="nothing was said today.", order=[],
+                   through_line="an empty night", palette={})
 
     def arousal(i: int) -> float:
-        return by_index[i].interpretation.mood.arousal
+        return live[i].interpretation.mood.arousal
 
-    order = list(idx)
-    if len(idx) >= 3:
-        first, rest = idx[0], idx[1:]
+    order = list(range(len(live)))
+    if len(order) >= 3:
+        rest = order[1:]
         rest.sort(key=arousal, reverse=True)
         calmest = min(rest, key=arousal)
         rest.remove(calmest)
-        order = [first] + rest + [calmest]
+        order = [0] + rest + [calmest]
 
-    loudest = max(live, key=lambda r: r.interpretation.mood.arousal)
+    loudest = max(live, key=lambda s: s.interpretation.mood.arousal)
     themes: Dict[str, int] = {}
-    for r in live:
-        themes[r.interpretation.theme] = themes.get(r.interpretation.theme, 0) + 1
+    for s in live:
+        themes[s.interpretation.theme] = themes.get(s.interpretation.theme, 0) + 1
     theme = max(themes, key=lambda k: themes[k]) if themes else "feeling"
 
-    raw_title = loudest.interpretation.word or loudest.interpretation.title or "dream"
-    title = spec_mod.clean_word(raw_title) or "DREAM"
-    titles = [by_index[i].interpretation.title for i in order]
+    title = spec_mod.clean_word(loudest.interpretation.word or loudest.interpretation.title) or "DREAM"
+    titles = [live[i].interpretation.title for i in order]
     logline = f"{len(live)} things said today: " + ", ".join(titles) + "."
 
     return Arc(
@@ -355,9 +361,3 @@ def compose_arc(results: Sequence[PhraseResult]) -> Arc:
         through_line=f"a night of {theme}, opening on {titles[0]} and settling into {titles[-1]}"[:140],
         palette=dict(loudest.spec_draft["palette"]),
     )
-
-
-def local_ingest(phrases: Sequence[str]) -> Tuple[List[PhraseResult], Arc]:
-    """The whole offline path: results per phrase plus an arc. Never raises, never blocks."""
-    results = [local_result(i, p) for i, p in enumerate(phrases)]
-    return results, compose_arc(results)

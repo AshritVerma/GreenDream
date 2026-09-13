@@ -1,13 +1,13 @@
-"""The Claude tier: one call per batch of five phrases, tool-use so the answer is
+"""The Claude tier: one query in, one scene draft out, tool-use so the answer is
 schema-shaped, and a hard fall-through to the local tier on any trouble.
 
-Why one call and not five: five phrases cost one round trip, one cached system prompt, and
-the model gets to see them together, which is what makes the `arc` worth anything. The
-system block carries `cache_control: ephemeral`, so repeat batches only pay for the phrases.
+The person gets at most five words, so the model's job is narrow and the prompt can afford to
+be strict about it: read the words as one thing, pick the single most recognisable depiction,
+fill the vocabulary. The system block carries `cache_control: ephemeral`, so every request
+after the first pays only for the query.
 
-Trust boundary: the model's answer is a suggestion. Every spec goes through
-`spec.validate()`, every field is clamped, and anything missing is filled from the local
-tier rather than dropped.
+Trust boundary: the model's answer is a suggestion. The spec goes through `spec.validate()`,
+every field is clamped, and any failure at all returns the local draft instead.
 """
 
 from __future__ import annotations
@@ -16,22 +16,21 @@ import json
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from . import fallback
 from .config import settings
-from .models import Arc, Interpretation, Mood, PhraseResult
-from .spec import SPEC_SCHEMA, clean_word, hex_or, validate
+from .models import Interpretation, Mood, SceneResult
+from .spec import SPEC_SCHEMA, validate
 
 API_URL = "https://api.anthropic.com/v1/messages"
 
 INTERPRETATION_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
-        "title": {"type": "string", "description": "2-4 words: what would be shown"},
+        "title": {"type": "string", "description": "2-4 words: what will be shown"},
         "theme": {"type": "string", "enum": ["weather", "feeling", "place", "object", "event", "person", "abstract"]},
         "keywords": {"type": "array", "items": {"type": "string"}, "description": "3-5 concrete nouns worth drawing"},
-        "word": {"type": ["string", "null"], "description": "1-7 chars of A-Z ! ? or null; the only text the facade may show"},
         "mood": {"type": "object", "properties": {"valence": {"type": "number"}, "arousal": {"type": "number"}}},
         "recognizability": {"type": "number", "description": "0-1: would a stranger 300 m away recognise this depiction"},
         "notes": {"type": "string", "description": "one short line on the depiction choice"},
@@ -39,48 +38,21 @@ INTERPRETATION_SCHEMA: Dict[str, Any] = {
     "required": ["title", "theme", "keywords", "mood", "recognizability"],
 }
 
-ARC_SCHEMA: Dict[str, Any] = {
+PERFORM_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
-        "title": {"type": "string", "description": "the night's name, 1-7 chars, A-Z ! ? only"},
-        "logline": {"type": "string", "description": "one sentence: the story these five phrases tell together"},
-        "order": {"type": "array", "items": {"type": "integer"}, "description": "phrase indices in performance order, quiet open, loud middle, quiet close"},
-        "through_line": {"type": "string", "description": "the thread connecting them"},
-        "palette": {"type": "object", "properties": {"base": {"type": "string"}, "accent": {"type": "string"}, "glow": {"type": "string"}}},
+        "interpretation": INTERPRETATION_SCHEMA,
+        "spec": SPEC_SCHEMA,
     },
-    "required": ["title", "logline", "order", "through_line"],
-}
-
-INGEST_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "results": {
-            "type": "array",
-            "description": "one entry per phrase, in the order given",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "index": {"type": "integer", "description": "the phrase's index as given"},
-                    "ok": {"type": "boolean"},
-                    "interpretation": INTERPRETATION_SCHEMA,
-                    "spec": SPEC_SCHEMA,
-                },
-                "required": ["index", "ok", "interpretation", "spec"],
-            },
-        },
-        "arc": ARC_SCHEMA,
-    },
-    "required": ["results", "arc"],
+    "required": ["interpretation", "spec"],
 }
 
 SYSTEM = """You are the imagination of a 21-storey building whose 153 windows (17 rows x 9 columns) are lights.
-People send it short phrases - a thing, a place, a feeling, an event. You read a batch of them at once and, for each one, decide what the tower should become.
+A person on the plaza gets at most five words to say what they want to see - "a rocket launch", "my heart is racing", "the first snow". Those words are ONE thing, not a list. Read them together and turn them into one short light performance.
 
-For every phrase return two things:
-- interpretation: what the phrase means, in words. Theme, 3-5 concrete nouns, mood, and an honest recognizability score.
+Return two things:
+- interpretation: what the words mean, in words. Theme, 3-5 concrete nouns, mood, and an honest recognizability score.
 - spec: how to show it, filling the scene vocabulary. You never draw pixels; you choose from the vocabulary and the renderer does the rest.
-
-Then return one arc for the whole batch: the five phrases read as a single night, ordered quiet-loud-quiet, with a name of at most 7 capital letters.
 
 Rules that come from the building itself:
 - Pick the ONE most recognisable depiction. Bold and simple beats detailed: nine windows wide, seen from 300 m away.
@@ -121,20 +93,19 @@ def _post(body: Dict[str, Any], timeout: float) -> Dict[str, Any]:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def call_claude(phrases: Sequence[str], timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
+def call_claude(query: str, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
     """Return the raw tool input, or None if anything at all went wrong."""
     if not settings.llm_available:
         return None
-    listing = "\n".join(f"{i}. {p}" for i, p in enumerate(phrases))
     body = {
         "model": settings.model,
-        "max_tokens": 3000,
+        "max_tokens": 1200,
         "system": [{"type": "text", "text": SYSTEM % _reference_block(),
                     "cache_control": {"type": "ephemeral"}}],
-        "tools": [{"name": "ingest", "description": "Interpret a batch of phrases and draft a scene for each",
-                   "input_schema": INGEST_SCHEMA}],
-        "tool_choice": {"type": "tool", "name": "ingest"},
-        "messages": [{"role": "user", "content": f"{len(phrases)} phrases:\n{listing}"}],
+        "tools": [{"name": "perform", "description": "Perform one scene on the building",
+                   "input_schema": PERFORM_SCHEMA}],
+        "tool_choice": {"type": "tool", "name": "perform"},
+        "messages": [{"role": "user", "content": query[: settings.max_chars]}],
     }
     try:
         data = _post(body, timeout if timeout is not None else settings.llm_timeout)
@@ -179,102 +150,30 @@ def _interpretation(raw: Any, draft: Dict[str, Any]) -> Interpretation:
     )
 
 
-def _arc(raw: Any, results: Sequence[PhraseResult]) -> Arc:
-    """Use the model's arc when it is coherent, otherwise compose one locally."""
-    local = fallback.compose_arc(results)
-    if not isinstance(raw, dict):
-        return local
-    valid = {r.index for r in results}
-    order = [int(i) for i in raw.get("order", []) if isinstance(i, (int, float)) and int(i) in valid]
-    seen: List[int] = []
-    for i in order:
-        if i not in seen:
-            seen.append(i)
-    for i in sorted(valid):  # anything the model forgot still gets played
-        if i not in seen:
-            seen.append(i)
-    palette = raw.get("palette") if isinstance(raw.get("palette"), dict) else {}
-    return Arc(
-        title=clean_word(raw.get("title")) or local.title,
-        logline=str(raw.get("logline") or local.logline)[:280],
-        order=seen or local.order,
-        through_line=str(raw.get("through_line") or local.through_line)[:140],
-        palette={"base": hex_or(palette.get("base"), local.palette.get("base", "#101a2e")),
-                 "accent": hex_or(palette.get("accent"), local.palette.get("accent", "#7cc4ff")),
-                 "glow": hex_or(palette.get("glow"), local.palette.get("glow", "#ffffff"))},
-    )
+def ingest(query: str) -> Tuple[SceneResult, str, int]:
+    """One query to one scene. Returns (result, tier, latency_ms).
 
-
-def claude_ingest(phrases: Sequence[str]) -> Tuple[List[PhraseResult], Arc, str, bool]:
-    """One batched call. Returns (results, arc, tier, used_llm).
-
-    A missing or unparseable tool block sends the whole batch local. Individual phrases the
-    model skipped are filled from the local tier, so a partial answer is still worth having.
-    """
-    raw = call_claude(phrases)
-    if raw is None:
-        local_results, local_arc = fallback.local_ingest(phrases)
-        return local_results, local_arc, "local", False
-
-    by_index: Dict[int, Dict[str, Any]] = {}
-    for item in raw.get("results", []) if isinstance(raw.get("results"), list) else []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            i = int(item.get("index"))
-        except (TypeError, ValueError):
-            continue
-        if 0 <= i < len(phrases) and i not in by_index:
-            by_index[i] = item
-
-    if not by_index:
-        local_results, local_arc = fallback.local_ingest(phrases)
-        return local_results, local_arc, "local", False
-
-    results: List[PhraseResult] = []
-    for i, phrase in enumerate(phrases):
-        item = by_index.get(i)
-        if item is None:
-            results.append(fallback.local_result(i, phrase))
-            continue
-        draft = validate(item.get("spec"))
-        ok = bool(item.get("ok", True)) and draft["ok"]
-        if not ok:
-            results.append(fallback.blocked_result(i, phrase))
-            continue
-        results.append(PhraseResult(index=i, phrase=phrase, ok=True, tier=settings.model,
-                                    interpretation=_interpretation(item.get("interpretation"), draft),
-                                    spec_draft=draft))
-    return results, _arc(raw.get("arc"), results), settings.model, True
-
-
-def ingest(phrases: Sequence[str]) -> Tuple[List[PhraseResult], Arc, str, int]:
-    """The whole pipeline for one batch: moderation, the chosen tier, timing.
-
-    Blocked phrases never reach the API. If everything is blocked there is nothing to ask
-    about, so no call is made at all.
+    Moderation first, so a blocked query is never sent to the API. Then the model if it is
+    switched on and reachable, then the local tier. There is no path where a query goes
+    unanswered.
     """
     t0 = time.time()
-    flags = [fallback.is_blocked(p) for p in phrases]
-    askable = [p for p, blocked in zip(phrases, flags) if not blocked]
 
-    if not askable or not settings.llm_available:
-        results, arc = fallback.local_ingest(phrases)
-        tier = "blocked" if not askable else "local"
-        return results, arc, tier, int((time.time() - t0) * 1000)
+    def done(result: SceneResult) -> Tuple[SceneResult, str, int]:
+        return result, result.tier, int((time.time() - t0) * 1000)
 
-    sub_results, sub_arc, tier, used_llm = claude_ingest(askable)
+    if fallback.is_blocked(query):
+        return done(fallback.blocked_result(query))
 
-    if len(askable) == len(phrases):
-        return sub_results, sub_arc, tier, int((time.time() - t0) * 1000)
+    raw = call_claude(query) if settings.llm_available else None
+    if raw is None:
+        return done(fallback.local_result(query))
 
-    # Re-seat the answers next to the blocked phrases so indices match the request.
-    merged: List[PhraseResult] = []
-    it = iter(sub_results)
-    for i, (phrase, blocked) in enumerate(zip(phrases, flags)):
-        if blocked:
-            merged.append(fallback.blocked_result(i, phrase))
-        else:
-            r = next(it)
-            merged.append(r.model_copy(update={"index": i}))
-    return merged, fallback.compose_arc(merged), tier, int((time.time() - t0) * 1000)
+    draft = validate(raw.get("spec"))
+    if not draft["ok"]:
+        return done(fallback.blocked_result(query))
+
+    return done(SceneResult(
+        query=query, words=fallback.words_of(query), ok=True, tier=settings.model,
+        interpretation=_interpretation(raw.get("interpretation"), draft), spec_draft=draft,
+    ))
