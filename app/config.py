@@ -6,6 +6,10 @@ Two independent controls, both readable at /api/state:
     gate          "auto" closes intake at sunset, "open" keeps it open, "closed" is the
                   kill switch.
 
+Two tokens, both unset by default (which is right on a laptop and wrong behind a tunnel):
+GD_INGEST_TOKEN guards both writing and previewing, GD_ADMIN_TOKEN guards the switches and
+the review queue.
+
 `settings` is a process-wide singleton; `settings.refresh()` re-reads the environment
 (the tests use it after monkeypatching os.environ).
 """
@@ -122,6 +126,15 @@ class Settings:
         self.tz: str = os.environ.get("GD_TZ", "America/New_York").strip()
         self.rate_seconds: float = _float("GD_RATE_SECONDS", 20.0)
         self.rate_per_hour: int = _int("GD_RATE_PER_HOUR", 20)
+        # A preview is cheap and is meant to be tried repeatedly while someone plays with their
+        # wording, so it gets its own far looser allowance - but still an allowance, because it
+        # is a model call.
+        self.preview_rate_seconds: float = _float("GD_PREVIEW_RATE_SECONDS", 2.0)
+        self.preview_per_hour: int = _int("GD_PREVIEW_PER_HOUR", 120)
+        # Rate limits key on the client IP, which is only knowable behind a proxy we trust to
+        # set X-Forwarded-For. Off by default: otherwise anyone can forge a fresh identity per
+        # request with one header and the limit is decoration.
+        self.trust_proxy: bool = _bool("GD_TRUST_PROXY", False)
         # One submission is one thing to show, said in at most this many words.
         self.max_words: int = _int("GD_MAX_WORDS", 5)
         self.max_chars: int = _int("GD_MAX_CHARS", 60)

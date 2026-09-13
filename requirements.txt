@@ -3,3 +3,6 @@ uvicorn>=0.30
 pydantic>=2.7
 pytest>=8.0
 httpx>=0.27
+# tests only: tests/test_alignment.py imports GreenDream's scene.py to prove a draft made
+# here survives the renderer unchanged, and that module renders with numpy.
+numpy>=1.26

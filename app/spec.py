@@ -23,6 +23,7 @@ SCHEMA_VERSION = "spec-v1"
 COLS = 9  # the tower is 9 windows wide; sprite rows are exactly this long
 ROWS = 17  # and 17 tall, 153 windows in all
 MAX_BEATS = 4
+BEAT_FLOOR = 0.3  # no beat may sit darker: from the street a near-black tower reads as broken
 
 WORLDS = ["ocean", "forest", "aurora", "hyperspace", "sunrise", "storm", "snow", "lava", "city"]
 WORLD_NAMES = WORLDS + ["none"]
@@ -113,6 +114,8 @@ def _beats(raw: Any, base: Dict[str, Any]) -> list:
     A beat names only what changes and inherits the rest from the scene, so the model can say
     "then it goes white and shakes" without restating the palette. Fewer than two usable beats
     is not a timeline, so it degrades to nothing rather than to a single pointless phase.
+    Brightness is floored at ``BEAT_FLOOR``: a model that asks for 0.0 gets a quiet moment,
+    not a building that looks switched off.
     """
     if not isinstance(raw, list):
         return []
@@ -126,7 +129,7 @@ def _beats(raw: Any, base: Dict[str, Any]) -> list:
             "motion": _motion(b.get("motion"), base["motion"]),
             "particles": _particles(b.get("particles"), base["particles"]),
             "flash": _flash(b.get("flash"), base["flash"]),
-            "brightness": _num(b.get("brightness"), 0, 1, 1.0),
+            "brightness": max(BEAT_FLOOR, _num(b.get("brightness"), 0, 1, 1.0)),
             "word": clean_word(b.get("word")) if "word" in b else base["word"],
         }
         out.append(beat)

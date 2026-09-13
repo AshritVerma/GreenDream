@@ -6,6 +6,11 @@ reads with `GET /api/queue?since=`, and the day of scenes tonight's arc is compo
 
 `seq` is epoch milliseconds and increases within a process, so `since=<seq>` is a cursor a
 consumer can hold across restarts without any coordination.
+
+Reviews are decisions about rows that already exist, and the log is append-only, so a decision
+is written as its own line (`kind: "review"`) and applied over the submissions when they are
+read. Nothing is ever rewritten or deleted: the archive is the point, and "we said no to this"
+is itself a thing worth keeping.
 """
 
 from __future__ import annotations
@@ -66,12 +71,30 @@ def _read_day(day: str) -> List[Dict[str, Any]]:
     return out
 
 
+def _split(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Submissions with the latest review decision applied; review lines themselves dropped."""
+    decisions: Dict[str, str] = {}
+    for r in rows:
+        if r.get("kind") == "review" and r.get("id"):
+            decisions[str(r["id"])] = str(r.get("review", "pending"))
+    out = []
+    for r in rows:
+        if r.get("kind") == "review":
+            continue
+        rid = str(r.get("id", ""))
+        if rid in decisions:
+            r = dict(r, review=decisions[rid])
+        out.append(r)
+    return out
+
+
 def recent(since: int = 0, limit: int = 50, days: int = 2) -> List[Dict[str, Any]]:
     """Submissions with seq > since, oldest first, looking back `days` local days."""
-    today = date.today()
+    today_ = date.today()
     rows: List[Dict[str, Any]] = []
     for back in range(days - 1, -1, -1):
-        rows.extend(_read_day((today - timedelta(days=back)).isoformat()))
+        rows.extend(_read_day((today_ - timedelta(days=back)).isoformat()))
+    rows = _split(rows)
     rows = [r for r in rows if int(r.get("seq", 0)) > since]
     rows.sort(key=lambda r: int(r.get("seq", 0)))
     return rows[-limit:] if limit else rows
@@ -79,9 +102,19 @@ def recent(since: int = 0, limit: int = 50, days: int = 2) -> List[Dict[str, Any
 
 def today(limit: int = 0) -> List[Dict[str, Any]]:
     """Everything said today, oldest first: the material tonight's dream is made from."""
-    rows = _read_day(date.today().isoformat())
+    rows = _split(_read_day(date.today().isoformat()))
     rows.sort(key=lambda r: int(r.get("seq", 0)))
     return rows[-limit:] if limit else rows
+
+
+def review(record_id: str, decision: str) -> bool:
+    """Record a decision about one submission. True if that id exists in the last two days."""
+    known = {str(r.get("id")) for r in recent(limit=0)}
+    if record_id not in known:
+        return False
+    append({"kind": "review", "id": record_id, "review": decision, "seq": next_seq(),
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    return True
 
 
 # --------------------------------------------------------------------------- query cache

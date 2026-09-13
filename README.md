@@ -22,7 +22,10 @@ Copy-Item .env.example .env            # optional; fill in OPENAI_API_KEY to ena
 ```
 
 A bench page for trying it by hand is at http://localhost:8100/demo, interactive API docs at
-`/docs`. Tests: `.\.venv\Scripts\python.exe -m pytest -q` (35 tests, no network, no key needed).
+`/docs`. Tests: `.\.venv\Scripts\python.exe -m pytest -q` (125 tests, no network, no key needed).
+`tests/test_alignment.py` also imports GreenDream's `library.py` and `scene.py` when that repo is
+checked out next to this one, to prove a draft made here plays there unchanged; it skips when it
+is not (set `GREENDREAM_PATH` to point at it elsewhere).
 
 With no key it still answers every request — see the local tier below.
 

@@ -68,8 +68,16 @@ class IngestRequest(BaseModel):
     @field_validator("query")
     @classmethod
     def _clean(cls, v: str) -> str:
+        """Control characters out, contact details out, then the five-word budget.
+
+        The word count is checked after scrubbing, because a phone number collapses to one
+        word and rejecting the original for length would be a confusing way to say "no".
+        """
+        from .fallback import scrub_pii   # imported here: fallback imports models
+
         text = re.sub(r"[\x00-\x1f\x7f]", " ", str(v))
         text = re.sub(r"\s+", " ", text).strip()[: settings.max_chars]
+        text = scrub_pii(text)
         if not text:
             raise ValueError("say something")
         words = text.split(" ")
@@ -136,6 +144,21 @@ class StateResponse(BaseModel):
     live_view_url: str = ""
     max_words: int = 5
     max_chars: int = 60
+
+
+class ReviewRequest(BaseModel):
+    """One operator decision about one submission."""
+
+    id: str = Field(..., max_length=64)
+    decision: str = Field(..., description="'approved' | 'rejected' | 'pending'")
+
+    @field_validator("decision")
+    @classmethod
+    def _decision(cls, v: str) -> str:
+        v = str(v).strip().lower()
+        if v not in ("approved", "rejected", "pending"):
+            raise ValueError("decision must be 'approved', 'rejected', or 'pending'")
+        return v
 
 
 class SwitchRequest(BaseModel):

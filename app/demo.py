@@ -180,6 +180,12 @@ for (const t of TRIES) {
 
 let MAXW = 5;
 
+// Everything this page renders is either somebody's query or something a model wrote, and it all
+// goes through innerHTML. So it all goes through here first. The facade cannot show text at all,
+// which is exactly why the bench is the one place where an injected string has anywhere to land.
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
 function words() {
   return q.value.trim().split(/\\s+/).filter(Boolean);
 }
@@ -279,7 +285,7 @@ function playFacade(d, host) {
     const mo = b.motion, pa = b.particles, fl = b.flash;
 
     segs.forEach((s, i) => s.className = i === bi ? 'on' : '');
-    cap.innerHTML = `<b>${b.label || d.title}</b><br>${b.word ? 'showing ' + b.word : 'no text'}`;
+    cap.innerHTML = `<b>${esc(b.label || d.title)}</b><br>${b.word ? 'showing ' + esc(b.word) : 'no text'}`;
 
     // background: the palette's dark base, lifted by this beat's brightness
     let k = 0.3 + 0.7 * bright;
@@ -394,26 +400,26 @@ function render(body) {
 
   const left = document.createElement('div');
   left.innerHTML = `
-    <h2>${it.title || d.title}</h2>
-    <p class="said">&ldquo;${r.query.replace(/</g, '&lt;')}&rdquo; &middot; ${r.words.length} words</p>
+    <h2>${esc(it.title || d.title)}</h2>
+    <p class="said">&ldquo;${esc(r.query)}&rdquo; &middot; ${r.words.length} words</p>
     ${body.preview ? '<span class="badge partial">preview &middot; not logged</span>' : ''}
-    <span class="badge ${tierClass}">${r.tier}</span>
-    ${r.match && r.match !== r.tier ? `<span class="badge ${(r.unused_words || []).length ? 'partial' : ''}">${r.match} match</span>` : ''}
-    <span class="badge">${it.theme}</span>
-    ${d.word ? `<span class="badge">shows ${d.word}</span>` : '<span class="badge">no text</span>'}
-    <div class="chips">${(it.keywords || []).map(k => `<span class="chip">${k}</span>`).join('')}</div>
+    <span class="badge ${tierClass}">${esc(r.tier)}</span>
+    ${r.match && r.match !== r.tier ? `<span class="badge ${(r.unused_words || []).length ? 'partial' : ''}">${esc(r.match)} match</span>` : ''}
+    <span class="badge">${esc(it.theme)}</span>
+    ${d.word ? `<span class="badge">shows ${esc(d.word)}</span>` : '<span class="badge">no text</span>'}
+    <div class="chips">${(it.keywords || []).map(k => `<span class="chip">${esc(k)}</span>`).join('')}</div>
     ${spent}
     <div class="kv" style="margin-top:12px">
-      <div>world</div><div>${d.world}</div>
+      <div>world</div><div>${esc(d.world)}</div>
       <div>motion</div><div>${d.motion.kind} · speed ${d.motion.speed.toFixed(2)} · amount ${d.motion.amount.toFixed(2)}</div>
       <div>particles</div><div>${d.particles.kind}${d.particles.kind === 'none' ? '' : ` · ${d.particles.density.toFixed(2)} ${d.particles.direction}`}</div>
       <div>flash</div><div>${d.flash.kind}${d.flash.kind === 'none' ? '' : ` · ${d.flash.rate.toFixed(2)}`}</div>
       <div>tempo</div><div>${Math.round(d.tempo_bpm)} bpm · ${d.duration_s}s</div>
       <div>sprite</div><div>${d.sprite ? `${d.sprite.rows.length} rows · ${d.sprite.anim}` : 'none — the whole facade carries it'}</div>
-      <div>notes</div><div>${it.notes || '&mdash;'}</div>
+      <div>notes</div><div>${it.notes ? esc(it.notes) : '&mdash;'}</div>
     </div>
-    <p class="meta" style="margin:12px 0 0">answered by ${body.tier} in ${body.latency_ms} ms ·
-       ${body.channel} · priority ${body.priority}</p>`;
+    <p class="meta" style="margin:12px 0 0">answered by ${esc(body.tier)} in ${body.latency_ms} ms ·
+       ${esc(body.channel)} · priority ${esc(body.priority)}</p>`;
 
   const side = document.createElement('div');
   side.className = 'side';
@@ -456,11 +462,11 @@ async function refreshArc() {
     el.className = '';
     el.innerHTML = `
       <div class="arc" style="padding-left:12px">
-        <h2>${a.arc.title}</h2>
-        <p style="margin:0 0 6px">${a.arc.logline}</p>
-        <p class="meta" style="margin:0">${a.arc.through_line}</p>
+        <h2>${esc(a.arc.title)}</h2>
+        <p style="margin:0 0 6px">${esc(a.arc.logline)}</p>
+        <p class="meta" style="margin:0">${esc(a.arc.through_line)}</p>
         <div class="chips">${a.arc.order.map((i, n) =>
-          `<span class="chip">${n + 1}. ${a.scenes[i] || '?'}</span>`).join('')}</div>
+          `<span class="chip">${n + 1}. ${esc(a.scenes[i] || '?')}</span>`).join('')}</div>
       </div>`;
   } catch (e) {
     el.className = 'meta err';
@@ -484,20 +490,20 @@ async function submit(kind) {
     });
     const body = await res.json();
     if (res.status === 423) {
-      status.innerHTML = `<span class="err">${body.message}</span>`;
+      status.innerHTML = `<span class="err">${esc(body.message)}</span>`;
       document.getElementById('rawpanel').className = 'panel';
       document.getElementById('raw').textContent = JSON.stringify(body, null, 2);
       document.getElementById('out').innerHTML = '';
     } else if (!res.ok) {
       const why = body.detail ? (body.detail[0] ? body.detail[0].msg : body.detail) : (body.message || 'rejected');
-      status.innerHTML = `<span class="err">${res.status}: ${why}</span>`;
+      status.innerHTML = `<span class="err">${res.status}: ${esc(why)}</span>`;
     } else {
       status.textContent = '';
       render(body);
       if (!body.preview) refreshArc();   // a preview is not part of tonight
     }
   } catch (e) {
-    status.innerHTML = `<span class="err">${e}</span>`;
+    status.innerHTML = `<span class="err">${esc(e)}</span>`;
   }
   document.getElementById('peek').disabled = false;
   refreshState();
@@ -521,9 +527,9 @@ document.getElementById('flip').onclick = async () => {
   });
   const out = await res.json();
   msg.innerHTML = res.ok
-    ? `gate <b>${out.gate_mode}</b> · claude tier <b>${out.llm_enabled ? 'on' : 'off'}</b>` +
+    ? `gate <b>${esc(out.gate_mode)}</b> · model tier <b>${out.llm_enabled ? 'on' : 'off'}</b>` +
       (out.llm_enabled && !out.llm_available ? ' (no API key, so still local)' : '')
-    : `<span class="err">${out.detail || 'rejected'}</span>`;
+    : `<span class="err">${esc(out.detail || 'rejected')}</span>`;
   refreshState();
 };
 
