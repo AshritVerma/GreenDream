@@ -20,44 +20,83 @@ ADMIN = {"x-admin-token": "test-admin"}
 
 
 # --------------------------------------------------------------------------- moderation
+#
+# The tables below are docs/content-policy.md, executed. Each refusal names the category it
+# belongs to, so a rule that starts catching things for the wrong reason fails here rather
+# than quietly widening. Each near-miss is a phrase somebody will really type on the plaza.
 
-@pytest.mark.parametrize("phrase", [
-    "kill everyone",
-    "i want to kill someone",
-    "shoot the police",
-    "nazi rally",
-    "a genocide",
-    "rape",
-    "i want to die",
-    "kill myself",
-    "self harm",
-    "vote for trump",
-    "vote against them",
-    "buy bitcoin now",
-    "check www.example.com",
-    "text me 555 0100",
-    "she is a whore",
-    "fuck this",
+@pytest.mark.parametrize("phrase, category", [
+    ("kill everyone", "violence"),
+    ("i want to kill someone", "violence"),
+    ("shoot the police", "violence"),
+    ("beat up my roommate", "violence"),
+    ("death to all", "violence"),
+    ("nazi rally", "hate"),
+    ("a genocide", "hate"),
+    ("muslims are vermin", "hate"),
+    ("rape", "sexual"),
+    ("send nudes", "sexual"),
+    ("i want to die", "self-harm"),
+    ("kill myself", "self-harm"),
+    ("self harm", "self-harm"),
+    ("jump off the roof", "self-harm"),
+    ("she is a whore", "private-person"),
+    ("john is an idiot", "private-person"),
+    ("she is so ugly", "private-person"),
+    ("text me 555 0100", "private-person"),
+    ("vote for trump", "campaigning"),
+    ("vote against them", "campaigning"),
+    ("trump 2028", "campaigning"),
+    ("free palestine", "campaigning"),
+    ("black lives matter", "campaigning"),
+    ("buy bitcoin now", "advertising"),
+    ("check www.example.com", "advertising"),
+    ("we're hiring apply now", "advertising"),
+    ("bomb threat", "false-alarm"),
+    ("evacuate now", "false-alarm"),
+    ("the building is on fire", "false-alarm"),
+    ("there is a shooter", "false-alarm"),
+    ("fuck this", "profanity"),
 ])
-def test_the_categories_we_refuse(phrase):
+def test_the_categories_we_refuse(phrase, category):
     assert fallback.is_blocked(phrase), f"{phrase!r} should not reach the building"
+    assert fallback.category_of(phrase) == category, \
+        f"{phrase!r} is refused, but filed under {fallback.category_of(phrase)!r}"
 
 
 @pytest.mark.parametrize("phrase", [
-    "thunderstorm",
-    "kill the lights",              # a lighting cue, not a threat
-    "a killer bassline",
-    "my heart is racing",
-    "lebron dunk",
-    "sunset over boston",
-    "go celtics",
-    "class of 2027",
-    "i miss my dog",
-    "the charles river",
-    "shooting stars",               # 'shoot' with no target
+    # the library, which must never be collateral damage
+    "thunderstorm", "my heart is racing", "lebron dunk", "go celtics", "the charles river",
+    # violence-shaped idiom
+    "kill the lights", "a killer bassline", "shooting stars", "this is killing me",
+    "shoot me an email", "i bombed the exam", "take a stab at it", "beat harvard",
+    # words with a commoner innocent reading
+    "moby dick", "the naked eye", "pussycat", "cockpit", "sexy sunset",
+    # complaints about the world, which are not abuse of a person
+    "finals are stupid", "my cat is fat", "the t is dumb", "this is stupid",
+    # an identity is not an insult
+    "she is gay", "he is gay",
+    # a surname, a card game, a country, a lecture
+    "harris hall", "trump card", "i miss ukraine", "crypto lecture",
+    # fire that is not an emergency
+    "fireworks", "i'm on fire", "campfire", "fire drill", "the sox are on fire",
+    # mild words we deliberately keep
+    "hell yeah", "damn it's cold", "what the heck",
+    # the rest of the plaza
+    "sunset over boston", "class of 2027", "i miss my dog", "happy birthday mom",
+    "eid mubarak", "she said yes", "i got the job",
 ])
 def test_the_things_we_happily_show(phrase):
-    assert not fallback.is_blocked(phrase), f"{phrase!r} is innocent and was refused"
+    assert not fallback.is_blocked(phrase), \
+        f"{phrase!r} is innocent and was refused as {fallback.category_of(phrase)!r}"
+
+
+def test_a_refusal_says_why_to_the_operator_and_nothing_to_the_plaza():
+    """The building never explains. The log does, because somebody has to answer for it."""
+    result = fallback.local_result("buy bitcoin now")
+    assert "advertising" in result.interpretation.notes
+    assert result.spec_draft["word"] == "HMM?", "the facade's whole vocabulary for no"
+    assert "bitcoin" not in str(result.spec_draft), "the refused thing is never displayed"
 
 
 def test_a_refusal_is_a_shrug_and_never_a_scene():

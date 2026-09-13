@@ -471,18 +471,25 @@ is the only text the facade ever displays).
 ### 8.6 Safety and operations
 
 Done, and the reason each is listed here rather than deleted is that the remaining items depend
-on them: `BLOCKLIST` covers hate, violence, self-harm, campaigning, advertising and personal
-harassment on word boundaries (mirrored in both halves, and `test_alignment.py` fails if the two
-disagree); PII is scrubbed before a prompt is written down; remote submissions land as `pending`
+on them: **`docs/content-policy.md` is the written policy and the specification** — nine
+categories (violence, hate, sexual, self-harm, private person, campaigning, advertising, false
+alarms, profanity), each with its refusals and the near-misses that must be allowed. `RULES` in
+`genie.py` and in `language/app/fallback.py` is that document as regexes, byte-identical on both
+sides (`test_alignment.py` compares the rule tables themselves, not a sample of phrases), executed
+by `tests/test_policy.py` (73) and `language/tests/test_safety.py`; `category_of()` says which
+category refused a phrase, for the log and the review list but never for the facade. PII is
+scrubbed at intake on both sides — on the runner inside `genie.clip_words`, which is the funnel
+every channel and the journal line go through. Remote submissions land as `pending`
 and an operator works through `GET/POST /api/admin/review` before they can be pushed; `/input`
 takes a token for everything except a prompt, and prompts are rate limited per IP; the journal
 line carries tier and latency.
 
 Still open:
-- **A written content policy.** The blocklist is the implementation of a policy nobody has
-  written down, which means only the person who wrote the regex knows where the line is.
-- **A `freeze` event** (black frame, hold) as a kill switch that does not require a redeploy.
-  `phase → night` and `skip` exist but neither is "stop showing anything, now".
+- **No runtime allowlist.** If the gate refuses something innocent on the night, an operator can
+  only ask for a rephrasing; a fix is a code change and a restart. Deliberate (see the policy's
+  §5) but worth knowing before the 29th.
+- **The private-person category is the weak one.** Five words cannot tell a real classmate from a
+  song lyric; the regex catches the obvious shapes and the review queue is the real mechanism.
 - **The simulator page `/` is still unauthenticated.** Anyone with the tunnel URL can watch, which
   is fine, and can also use the control panel, which is not — the panel's build-driving buttons
   need `?key=`, so they fail closed, but the page should not be offering them at all.

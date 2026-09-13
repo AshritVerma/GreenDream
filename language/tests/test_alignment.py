@@ -184,25 +184,47 @@ def test_the_word_cleaner_agrees(gd_scene):
         assert spec_mod.clean_word(raw) == gd_scene.clean_word(raw), repr(raw)
 
 
-def test_the_blocklist_agrees_on_the_cases_that_matter():
-    """Both sides screen, so both must screen the same things.
+def test_the_blocklist_is_literally_the_same_list():
+    """One policy, two gates, no room for a judgement call about which is authoritative.
 
-    The runner's list exists for prompts typed straight at it; this one for everything that
-    arrives over the web. They are separate regexes, and these are the phrases where a
-    disagreement would actually let something through.
+    The runner screens prompts typed straight at it; this side screens everything arriving
+    over the web. Comparing behaviour on a sample would only catch the disagreements someone
+    thought to write down, so the rules themselves are compared, rule for rule.
     """
+    genie = _load("genie")
+    assert [name for name, _ in genie.RULES] == [name for name, _ in fallback.RULES], \
+        "the two gates disagree about what the policy categories are"
+    assert genie.RULES == fallback.RULES, "a category is written differently on the two sides"
+    assert genie.BLOCKLIST.pattern == fallback.BLOCKLIST.pattern
+
+
+def test_the_scrub_is_the_same_scrub():
+    """The runner writes the journal; this side writes the day's log. Both are archives."""
+    genie = _load("genie")
+    assert [p.pattern for p, _ in genie.PII_PATTERNS] == [p.pattern for p, _ in fallback.PII_PATTERNS]
+    assert [r for _, r in genie.PII_PATTERNS] == [r for _, r in fallback.PII_PATTERNS]
+    for raw in ("email me at bob@example.com", "call 617 555 0100", "see https://example.com/x",
+                "@someones_handle", "thunderstorm", "lebron dunk as 76er"):
+        assert genie.scrub_pii(raw) == fallback.scrub_pii(raw), raw
+
+
+def test_the_blocklist_agrees_on_the_cases_that_matter():
+    """The phrases where a disagreement would actually let something through, or eat a scene."""
     genie = _load("genie")
     blocked = ["kill everyone", "i want to kill someone", "kill myself", "i want to die",
                "nazi rally", "vote for someone", "buy bitcoin now", "fuck this",
-               "she is a whore", "call me 555 1234"]
+               "she is a whore", "call me 555 1234", "the building is on fire", "evacuate now"]
     allowed = ["thunderstorm", "kill the lights", "my heart is racing", "lebron dunk",
-               "a killer bassline", "go celtics", "sunset over boston"]
+               "a killer bassline", "go celtics", "sunset over boston", "finals are stupid",
+               "moby dick", "harris hall", "crypto lecture", "i'm on fire"]
     for phrase in blocked:
         assert fallback.is_blocked(phrase), f"the service let {phrase!r} through"
-        assert genie.BLOCKLIST.search(phrase), f"the runner let {phrase!r} through"
+        assert genie.is_blocked(phrase), f"the runner let {phrase!r} through"
+        assert fallback.category_of(phrase) == genie.category_of(phrase), \
+            f"{phrase!r} is refused for different reasons on the two sides"
     for phrase in allowed:
         assert not fallback.is_blocked(phrase), f"the service refused {phrase!r}"
-        assert not genie.BLOCKLIST.search(phrase), f"the runner refused {phrase!r}"
+        assert not genie.is_blocked(phrase), f"the runner refused {phrase!r}"
 
 
 def test_the_lexicon_agrees_on_mood():

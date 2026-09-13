@@ -101,8 +101,11 @@ HOW TO DECIDE
   and high tempo.
 - Use every word you were given. If part of the query cannot be depicted, let it steer palette,
   tempo or rhythm rather than dropping it, and say so in notes.
-- Set ok=false for hate, harassment, sexual content, or anything targeting a real private person.
-  Public celebration of athletes, artists, holidays and teams is fine.
+- Set ok=false for the refusal categories in docs/content-policy.md: violence against a person,
+  hate, sexual content, self-harm, anything targeting a real private person, political
+  campaigning, advertising, a false alarm (a facade saying FIRE! to a plaza is an instruction),
+  or profanity. Public celebration of athletes, artists, holidays, teams, places and religions is
+  fine, and the default is generous: refusing too much makes the building sullen.
 
 Reference depictions, the standard to match:
 %s

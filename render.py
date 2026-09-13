@@ -41,8 +41,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Deque, Dict, Optional, Tuple
 
 from common.canvas import COLS, ROWS, Canvas
-from common.webserver import facade_js
-from genie import BLOCKLIST, MODEL, claude_spec, clip_words, lexicon_spec
+from common.webserver import facade_js, secret
+from genie import MODEL, claude_spec, clip_words, is_blocked, lexicon_spec, scrub_pii
 from library import LIBRARY, lookup, normalize
 from scene import SHRUG, Performance, validate
 
@@ -57,7 +57,7 @@ DAILY_MODEL_CALLS = int(os.environ.get("GREENDREAM_DAILY_MODEL_CALLS", "400"))
 IP_PER_MINUTE = int(os.environ.get("GREENDREAM_IP_PER_MINUTE", "12"))
 
 INGEST_URL = os.environ.get("GREENDREAM_INGEST_URL", "").strip().rstrip("/")
-INGEST_TOKEN = os.environ.get("GD_INGEST_TOKEN", "").strip()
+INGEST_TOKEN = secret("GD_INGEST_TOKEN")   # or GD_INGEST_TOKEN_FILE, which is not in `ps`
 INGEST_TIMEOUT = float(os.environ.get("GREENDREAM_INGEST_TIMEOUT", "6"))
 
 
@@ -138,19 +138,21 @@ def digest(text: str, offline: bool = False, budget: Optional["Budget"] = None,
            ingest_url: str = "") -> Tuple[dict, str]:
     """Text -> validated spec, by the same tiers the building uses.
 
-    ``BLOCKLIST`` is checked here because neither ``lookup`` nor ``lexicon_spec``
-    does, and this is the one path where a phrase becomes pixels without the model
-    ever having had the chance to refuse it.
+    The gate is checked here because neither ``lookup`` nor ``lexicon_spec`` does, and
+    this is the one path where a phrase becomes pixels without the model ever having had
+    the chance to refuse it. It reads the whole submission, before the five-word clip, so
+    a refusal cannot hide behind the truncation (docs/content-policy.md).
 
     With ``ingest_url`` the language service does the interpreting, so the preview and
     the performance read the words the same way. It is tried before the local library:
     the point of the mode is that the answer comes from over there.
     """
-    text = clip_words(text)
-    if not text:
+    full = scrub_pii(text)
+    if not full:
         return validate(SHRUG), "empty"
-    if BLOCKLIST.search(text):
+    if is_blocked(full):
         return validate(SHRUG), "blocked"
+    text = clip_words(full)
     if ingest_url:
         got = ingest_digest(text, ingest_url)
         if got is not None:
