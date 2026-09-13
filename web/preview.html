@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GreenDream — five words for the building</title>
+<style>
+  :root{--bg:#07090f;--panel:#0f131c;--line:#1d2431;--ink:#e6e9ef;--dim:#8a94a6;--warm:#ffb454;--cool:#7cc4ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,sans-serif;padding:28px 18px 60px}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.01em}
+  .lede{color:var(--dim);margin:0 0 24px;max-width:56ch}
+  .cols{display:grid;grid-template-columns:1fr 340px;gap:28px;align-items:start}
+  @media (max-width:760px){.cols{grid-template-columns:1fr}}
+  form{display:flex;flex-direction:column;gap:10px}
+  .row{display:flex;gap:10px}
+  input{flex:1;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:15px;font:inherit;font-size:18px}
+  input:focus{outline:0;border-color:#33415e}
+  input.over{border-color:#c0455a}
+  button{background:var(--warm);color:#1a1204;border:0;border-radius:12px;padding:15px 20px;font:inherit;font-size:17px;font-weight:700;cursor:pointer}
+  button:disabled{background:#2a3143;color:#6b7689;cursor:not-allowed}
+  .count{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .count.over{color:#e0687c}
+  .msg{font-size:14px;color:var(--dim);min-height:1.5em}
+  .msg.err{color:#e0687c}
+  .stage{background:#05070c;border:1px solid var(--line);border-radius:14px;padding:12px}
+  canvas{display:block;width:100%;height:420px}
+  .meta{display:flex;justify-content:space-between;gap:12px;margin-top:10px;font-size:13px;color:var(--dim)}
+  .meta b{color:var(--ink);font-weight:600}
+  .tier{font-variant-numeric:tabular-nums}
+  h2{font-size:13px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);margin:26px 0 8px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chips button{background:var(--panel);color:var(--ink);border:1px solid var(--line);font-size:14px;font-weight:400;padding:8px 12px;border-radius:999px}
+  .next{margin-top:22px;padding:14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:12px;color:var(--dim);font-size:14px}
+  .next b{color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Tell the Green Building five words</h1>
+  <p class="lede">Nine windows across, twenty-one storeys up, seen from the far side of the Charles.
+  Sketch as many phrases as you like here — it costs nothing and nobody else sees it.</p>
+
+  <div class="cols">
+    <div>
+      <form id="f" autocomplete="off">
+        <div class="row">
+          <input id="t" placeholder="a thing, a place, a feeling" maxlength="120">
+          <button id="go" type="submit">Sketch it</button>
+        </div>
+        <div class="count" id="count">0 / 5 words</div>
+        <div class="msg" id="msg"></div>
+      </form>
+
+      <h2>Or borrow one</h2>
+      <div class="chips" id="chips"></div>
+
+      <div class="next">
+        <b>Sending it to the real building is next.</b>
+        Each day is split into 30-minute slots and one phrase goes up in each,
+        so submitting will mean picking a slot and joining that night's dream.
+      </div>
+    </div>
+
+    <div>
+      <div class="stage">
+        <canvas id="c"></canvas>
+        <div class="meta">
+          <span id="title">&nbsp;</span>
+          <span class="tier" id="tier"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/facade.js"></script>
+<script>
+(function () {
+  const f = document.getElementById('f'), t = document.getElementById('t'),
+        go = document.getElementById('go'), msg = document.getElementById('msg'),
+        count = document.getElementById('count'), titleEl = document.getElementById('title'),
+        tierEl = document.getElementById('tier'), cv = document.getElementById('c');
+
+  const facade = new Facade(cv, { reflection: true });
+  let player = null;
+  facade.draw('000000'.repeat(153));
+  addEventListener('resize', () => { facade.resize(); if (player) facade.draw(player.rec.frames[player.i]); });
+
+  const words = s => s.trim().split(/\s+/).filter(Boolean);
+
+  function updateCount() {
+    const n = words(t.value).length, over = n > 5;
+    count.textContent = n + ' / 5 words' + (over ? ' — only the first five are used' : '');
+    count.classList.toggle('over', over);
+    t.classList.toggle('over', over);
+  }
+  t.addEventListener('input', updateCount);
+
+  // Deliberately only on submit, never per keystroke: an unknown phrase costs a model call.
+  f.addEventListener('submit', e => { e.preventDefault(); sketch(t.value); });
+
+  ['thunderstorm', 'rocket launch', 'calm ocean', 'birthday', 'snow day', 'my heart is racing']
+    .forEach(p => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = p;
+      b.onclick = () => { t.value = p; updateCount(); sketch(p); };
+      document.getElementById('chips').appendChild(b);
+    });
+
+  function sketch(text) {
+    if (!words(text).length) { t.focus(); return; }
+    go.disabled = true;
+    msg.className = 'msg';
+    msg.textContent = 'imagining…';
+    fetch('/digest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    })
+      .then(r => r.json().then(j => ({ status: r.status, j })))
+      .then(({ status, j }) => {
+        if (status !== 200 || !j.ok) throw new Error(j.error || 'something went wrong');
+        show(j);
+      })
+      .catch(err => { msg.className = 'msg err'; msg.textContent = err.message; })
+      .finally(() => { go.disabled = false; });
+  }
+
+  function show(j) {
+    if (player) player.pause();
+    facade.resize();
+    player = new FacadePlayer(facade, j.rec, { loop: true });
+    player.play();
+    titleEl.innerHTML = '<b>' + esc(j.title) + '</b>';
+    const secs = (j.rec.frames.length / j.rec.fps).toFixed(0);
+    tierEl.textContent = secs + 's · ' + j.tier + (j.cached ? ' · cached' : ' · ' + j.ms + 'ms');
+    msg.className = 'msg';
+    msg.textContent = j.text !== t.value.trim()
+      ? 'using: “' + j.text + '”'
+      : 'sketch only — this never reached the building';
+  }
+
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  updateCount();
+  t.focus();
+})();
+</script>
+</body>
+</html>

@@ -22,6 +22,14 @@ from scene import SCHEMA, SHRUG, validate
 
 MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 
+MAX_WORDS = 5
+
+
+def clip_words(text: str) -> str:
+    """Five words is the whole contract. Every channel funnels through here, so a
+    caller that forgets to check is truncated rather than trusted."""
+    return " ".join(str(text or "").split()[:MAX_WORDS])
+
 SYSTEM = """You are the imagination of a 21-storey building whose 153 windows (17 rows x 9 columns) are lights.
 People on the plaza say anything - a thing, a place, a feeling, an event - and you turn it into a short light performance by filling a scene spec.
 Rules:
@@ -93,6 +101,7 @@ def request_async(text: str, bus: InputBus = BUS, offline: bool = False, source:
     ``source`` rides along so the caller can attribute the answer to the channel that
     asked for it; two overlapping prompts would otherwise be told apart by arrival order.
     """
+    text = clip_words(text)
 
     def go():
         t0 = time.time()
