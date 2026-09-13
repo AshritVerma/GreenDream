@@ -10,7 +10,7 @@ scene. A day of queries becomes one story at `GET /api/arc`, which is what seeds
 
 Independent of the GreenDream repo on purpose: nothing here imports it, nothing here edits it,
 and it can be deployed, restarted, and rate-limited without touching the thing driving 153
-windows. `FEATURES.md` has the switch semantics and the open questions.
+windows. The canonical feature list is GreenDream's `FEATURES.md`.
 
 ## Run it
 
@@ -97,7 +97,7 @@ built from either without another round trip to the model.
 
 `match`, `unused_words` and `coverage` stop the answer from pretending it understood more than it
 did — the local tier will happily unlock a canned scene off one recognised word, and these fields
-are how the frontend can say so out loud. See `FEATURES.md`.
+are how the frontend can say so out loud. See GreenDream's `FEATURES.md`.
 
 ## Two tiers, one shape
 
