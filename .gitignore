@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+sun_cache.json
+phrase_cache.json
+.pytest_cache/
