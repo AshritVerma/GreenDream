@@ -19,6 +19,13 @@ clock, ``spec`` and ``dream_script`` pushes - changes what the building does wit
 anyone, so when GREENDREAM_INPUT_TOKEN is set those require the token in an ``X-Input-Token``
 header or a ``?key=`` query parameter. Open ``/?key=TOKEN`` to use the control panel.
 Unset (the default) means open, which is fine on a laptop and not fine behind a tunnel.
+
+The frame stream and the facade are public; the control panel is not. When a token is set,
+an unauthorised client is told so over the stream (``auth``) and is never sent the control
+list at all, so the page offers only what that visitor can actually do.
+
+Secrets are read with ``secret()``, which prefers ``GREENDREAM_INPUT_TOKEN_FILE`` over
+``GREENDREAM_INPUT_TOKEN``: a value on a command line is in ``ps`` for every user on the box.
 """
 
 from __future__ import annotations
@@ -41,6 +48,42 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 def _read(name: str) -> str:
     with open(os.path.join(_HERE, "web", name), "r", encoding="utf-8") as f:
         return f.read()
+
+
+def secret(name: str, default: str = "") -> str:
+    """A secret from ``$NAME``, or from the file named by ``$NAME_FILE``.
+
+    Anything on a command line is readable by every user on the machine through ``ps``, and
+    ``FOO=x python main.py`` only moves it to ``/proc/<pid>/environ``, which at least needs
+    the same uid but is still copied into every child process. For a week-long unattended
+    run a file with mode 600 is the right place, so ``$NAME_FILE`` is the recommended way in.
+
+    ``$NAME`` still wins when it is set and non-empty, so nothing that works today stops
+    working: the file is an addition, not a migration. A file that cannot be read says so
+    rather than silently leaving the building open — an operator who thinks they set a token
+    and did not is worse off than one who never tried.
+    """
+    direct = os.environ.get(name, "").strip()
+    if direct:
+        return direct
+    path = os.environ.get(f"{name}_FILE", "").strip()
+    if not path:
+        return default
+    try:
+        value = open(path, "r", encoding="utf-8").read().strip()
+    except OSError as e:
+        print(f"[secret] {name}_FILE is set but unreadable ({path}): {e}", flush=True)
+        return default
+    if not value:
+        print(f"[secret] {name}_FILE is empty ({path})", flush=True)
+        return default
+    try:  # POSIX only; on Windows the ACL is not in st_mode and there is nothing to say
+        mode = os.stat(path).st_mode
+        if os.name == "posix" and mode & 0o077:
+            print(f"[secret] {path} is readable by other users — chmod 600 it", flush=True)
+    except OSError:
+        pass
+    return value
 
 
 def facade_js() -> str:
@@ -75,14 +118,16 @@ class ControlServer:
         self.controls: List[dict] = []
         self.status: Dict = {}
         self.latest_hex: str = "000000" * 153
-        self._clients: List[queue.Queue] = []
+        # (queue, authorised): the control list only goes to clients that could use it
+        self._clients: List[List] = []
         self._lock = threading.Lock()
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._sim_html: Optional[str] = None
-        self.input_token: str = os.environ.get("GREENDREAM_INPUT_TOKEN", "").strip()
+        self.input_token: str = secret("GREENDREAM_INPUT_TOKEN")
         self.text_gap_s: float = float(os.environ.get("GREENDREAM_TEXT_GAP_S", "10") or 0)
         self._last_text: Dict[str, float] = {}
+        self.frozen: bool = False   # set by the app; reported by /healthz so an operator can ask
 
     # -- input policy -----------------------------------------------------
     def allow_text(self, client: str, now: Optional[float] = None) -> bool:
@@ -113,7 +158,7 @@ class ControlServer:
 
     def set_controls(self, controls: List[dict]) -> None:
         self.controls = list(controls)
-        self._broadcast("controls", json.dumps(self.controls))
+        self._broadcast("controls", json.dumps(self.controls), operators_only=True)
 
     def set_status(self, **status) -> None:
         self.status = status
@@ -132,11 +177,17 @@ class ControlServer:
         self.latest_hex = hexstr
         self._broadcast("frame", hexstr)
 
-    def _broadcast(self, event: str, data: str) -> None:
+    def _broadcast(self, event: str, data: str, operators_only: bool = False) -> None:
+        """Fan one SSE event out. ``operators_only`` skips clients without the token.
+
+        The frames and the status are the public half of this page and go to everyone; the
+        control list is the half that drives a building, and a client that could not use it
+        is never sent it. Hiding it in the page would leave it one devtools inspection away.
+        """
         msg = f"event: {event}\ndata: {data}\n\n".encode()
         with self._lock:
-            clients = list(self._clients)
-        for q in clients:
+            clients = [c for c in self._clients if not operators_only or c[1]]
+        for q, _authorized in clients:
             try:
                 q.put_nowait(msg)
             except queue.Full:
@@ -204,8 +255,10 @@ class ControlServer:
                     return self._send(200, json.dumps({"rows": 17, "cols": 9, "hex": server.latest_hex}).encode(), "application/json")
                 if path == "/healthz":
                     # The input policy, so an operator can tell from outside whether the building
-                    # is actually locked down. Whether a token is set, never what it is.
+                    # is actually locked down. Whether a token is set, never what it is. `frozen`
+                    # is here so the kill switch can be confirmed from a phone with one GET.
                     return self._send(200, json.dumps({"ok": True, "locked": bool(server.input_token),
+                                                       "frozen": bool(server.frozen),
                                                        "text_gap_s": server.text_gap_s,
                                                        "clients": len(server._clients)}).encode(), "application/json")
                 if path == "/stream":
@@ -249,8 +302,12 @@ class ControlServer:
 
             def _stream(self):
                 q: queue.Queue = queue.Queue(maxsize=8)
+                # EventSource cannot set headers, so the stream takes the token the same way
+                # the page does: /stream?key=TOKEN.
+                authorized = server.authorized(self._token())
+                client: List = [q, authorized]
                 with server._lock:
-                    server._clients.append(q)
+                    server._clients.append(client)
                 try:
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
@@ -260,7 +317,9 @@ class ControlServer:
                     self.end_headers()
                     # initial state
                     self.wfile.write(f"event: meta\ndata: {json.dumps({'title': server.title, 'description': server.description})}\n\n".encode())
-                    self.wfile.write(f"event: controls\ndata: {json.dumps(server.controls)}\n\n".encode())
+                    self.wfile.write(f"event: auth\ndata: {json.dumps({'locked': bool(server.input_token), 'authorized': authorized})}\n\n".encode())
+                    if authorized:
+                        self.wfile.write(f"event: controls\ndata: {json.dumps(server.controls)}\n\n".encode())
                     if server.status:
                         self.wfile.write(f"event: status\ndata: {json.dumps(server.status)}\n\n".encode())
                     self.wfile.write(f"event: frame\ndata: {server.latest_hex}\n\n".encode())
@@ -276,8 +335,8 @@ class ControlServer:
                     pass
                 finally:
                     with server._lock:
-                        if q in server._clients:
-                            server._clients.remove(q)
+                        if client in server._clients:
+                            server._clients.remove(client)
 
         self._server = ThreadingHTTPServer((self.host, self.port), Handler)
         self._server.daemon_threads = True
