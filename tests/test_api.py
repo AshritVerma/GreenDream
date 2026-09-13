@@ -126,6 +126,55 @@ def test_unknown_words_still_get_a_mood(client):
     assert result["tier"] == "lexicon"
     assert result["ok"] is True
     assert result["interpretation"]["recognizability"] <= 0.4, "a mood is not a depiction"
+    assert result["coverage"] == 0.0
+    assert "finals" in result["unused_words"], "the lexicon depicts nothing, and says so"
+
+
+# --------------------------------------------------------------------------- honesty
+
+def test_digits_survive_normalisation():
+    assert fallback.normalize("lebron dunk as 76er") == "lebron dunk as 76er"
+    assert "76er" in fallback.local_result("lebron dunk as 76er").unused_words
+
+
+def test_partial_match_is_not_reported_as_a_full_one():
+    partial = fallback.local_result("lebron dunk as 76er")
+    full = fallback.local_result("lebron dunk")
+
+    assert partial.spec_draft["title"] == full.spec_draft["title"], "same canned scene"
+    assert partial.match == "alias" and full.match == "exact"
+    assert partial.unused_words == ["76er"]
+    assert partial.coverage < 1.0 and full.coverage == 1.0
+    assert partial.interpretation.recognizability < full.interpretation.recognizability, \
+        "one word out of three is not a 90% match"
+    assert "76er" in partial.interpretation.notes
+
+
+def test_stopwords_do_not_count_as_ignored():
+    assert fallback.local_result("a dunk").unused_words == []
+    assert fallback.local_result("take me to space").unused_words == []
+
+
+def test_unused_words_still_colour_the_energy():
+    plain = fallback.local_result("my heart is racing")
+    tired = fallback.local_result("my exhausted heart is racing")
+
+    assert tired.unused_words == ["exhausted"]
+    assert tired.spec_draft["tempo_bpm"] < plain.spec_draft["tempo_bpm"], \
+        "it cannot draw exhaustion, but it can slow down"
+    assert "energy" in tired.interpretation.notes
+
+
+def test_a_second_library_word_is_named_not_silently_dropped():
+    result = fallback.local_result("storm dunk 76er")
+    assert result.spec_draft["world"] == "storm", "the first match wins"
+    assert "dunk" in result.unused_words
+    assert "lebron dunk" in result.interpretation.notes, "say what it chose not to show"
+
+
+def test_the_model_tier_claims_full_coverage(with_stub_llm):
+    result, _, _ = llm.ingest("the green line")
+    assert result.match == "model" and result.unused_words == [] and result.coverage == 1.0
 
 
 def test_blocked_query_never_becomes_a_scene(client):

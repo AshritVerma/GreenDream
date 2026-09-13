@@ -155,28 +155,43 @@ ALIASES = {
 
 
 def normalize(text: str) -> str:
-    return re.sub(r"[^a-z' ]", " ", text.lower()).strip()
+    """Lower-case words, digits kept. "76er" is a jersey, not noise."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]", " ", text.lower())).strip()
 
 
-def lookup(text: str, cutoff: float = 0.7) -> Optional[Tuple[str, dict]]:
-    """Instant answers: exact, then alias word, then alias phrase, then fuzzy."""
-    q = re.sub(r"\s+", " ", normalize(text))
+def lookup(text: str, cutoff: float = 0.7) -> Optional[Tuple[str, dict, str, List[str]]]:
+    """Instant answers: exact, then alias word, then alias phrase, then fuzzy.
+
+    Returns the library key, the entry, *how* it matched, and which of the person's words did
+    the matching. The caller needs the last two to be honest about what it understood.
+    """
+    q = normalize(text)
     if not q:
         return None
+    tokens = q.split(" ")
     if q in LIBRARY:
-        return q, LIBRARY[q]
-    for w in q.split():
+        return q, LIBRARY[q], "exact", tokens
+    for w in tokens:
         if w in ALIASES:
             key = ALIASES[w]
-            return key, LIBRARY[key]
+            return key, LIBRARY[key], "alias", [w]
     for phrase, key in ALIASES.items():
         if phrase in q:
-            return key, LIBRARY[key]
+            return key, LIBRARY[key], "alias", phrase.split(" ")
     match = difflib.get_close_matches(q, list(LIBRARY) + list(ALIASES), n=1, cutoff=cutoff)
     if match:
         key = match[0] if match[0] in LIBRARY else ALIASES[match[0]]
-        return key, LIBRARY[key]
+        return key, LIBRARY[key], "fuzzy", tokens
     return None
+
+
+def understood_by(key: str, entry: dict) -> set:
+    """Every word a library entry can honestly claim to cover."""
+    words = set(key.split(" ")) | set(entry["keywords"]) | set(normalize(entry["spec"]["title"]).split(" "))
+    for alias, target in ALIASES.items():
+        if target == key:
+            words.update(alias.split(" "))
+    return words
 
 
 # --------------------------------------------------------------------------- affect lexicon
@@ -209,7 +224,8 @@ EMOTION_THEME = {"joy": "feeling", "love": "feeling", "calm": "feeling", "curiou
                  "neutral": "feeling"}
 
 STOPWORDS = {"the", "a", "an", "and", "or", "but", "is", "am", "are", "was", "were", "be", "to", "of", "in", "on",
-             "at", "for", "with", "my", "me", "i", "you", "it", "its", "this", "that", "so", "very", "just", "we"}
+             "at", "for", "with", "my", "me", "i", "you", "it", "its", "this", "that", "so", "very", "just", "we",
+             "as", "by", "from", "into", "over", "under", "than", "then", "too", "his", "her", "their", "our"}
 
 
 def lexicon_affect(text: str) -> Dict[str, object]:
@@ -264,32 +280,74 @@ def words_of(query: str) -> List[str]:
 
 def blocked_result(query: str) -> SceneResult:
     return SceneResult(
-        query=query, words=words_of(query), ok=False, tier="blocked",
+        query=query, words=words_of(query), ok=False, tier="blocked", match="blocked",
         interpretation=Interpretation(title="not shown", theme="blocked", keywords=[], word="HMM?",
-                                      mood=Mood(valence=0.0, arousal=0.2), recognizability=0.0,
-                                      notes="blocked by the local content filter"),
+                                     mood=Mood(valence=0.0, arousal=0.2), recognizability=0.0,
+                                     notes="blocked by the local content filter"),
         spec_draft=spec_mod.shrug(),
     )
+
+
+def _nudge(draft: Dict, affect: Dict[str, object], weight: float = 0.35) -> None:
+    """Let leftover words at least colour the energy of a library scene.
+
+    The local tier cannot depict "as 76er", but it can hear that the rest of the query is
+    loud or flat, and a canned scene that ignores the person's energy entirely feels like
+    being talked over.
+    """
+    ar, v = float(affect["arousal"]), float(affect["valence"])
+    draft["tempo_bpm"] = round((1 - weight) * draft["tempo_bpm"] + weight * (50 + 100 * ar), 1)
+    draft["motion"]["speed"] = round(min(1.0, (1 - weight) * draft["motion"]["speed"] + weight * ar), 2)
+    draft["mood"]["arousal"] = round(min(1.0, (1 - weight) * draft["mood"]["arousal"] + weight * ar), 2)
+    draft["mood"]["valence"] = round(max(-1.0, min(1.0, (1 - weight) * draft["mood"]["valence"] + weight * v)), 2)
 
 
 # --------------------------------------------------------------------------- the local tier
 
 def local_result(query: str) -> SceneResult:
-    """One query to one validated draft, offline. Library hit if we have one, else lexicon."""
+    """One query to one validated draft, offline.
+
+    The honesty rules here matter more than the pixels: the result says how it matched, which
+    words it could not use, and a recognizability score discounted by how much of the query it
+    actually understood. A single alias hit on a four-word query is not a 90% match.
+    """
     if is_blocked(query):
         return blocked_result(query)
 
+    tokens = normalize(query).split(" ") if normalize(query) else []
+    content = [w for w in tokens if w not in STOPWORDS]
+
     hit = lookup(query)
     if hit is not None:
-        key, entry = hit
+        key, entry, kind, matched = hit
+        known = understood_by(key, entry) | set(matched)
+        unused = [w for w in content if w not in known]
+        coverage = 1.0 - len(unused) / max(1, len(content))
+
         draft = spec_mod.validate(entry["spec"])
+        notes = [f"warm library scene '{key}', matched on {', '.join(repr(w) for w in matched)}"]
+        if unused:
+            listed = ", ".join(repr(w) for w in unused)
+            them = "them" if len(unused) > 1 else "it"
+            leftover = lexicon_affect(" ".join(unused))
+            if leftover["matched"]:
+                _nudge(draft, leftover)
+                notes.append(f"took the energy of {listed} but cannot depict {them}")
+            else:
+                notes.append(f"could not use {listed}")
+            others = {ALIASES[w] for w in unused if w in ALIASES and ALIASES[w] != key}
+            if others:
+                notes.append(f"the building shows one thing at a time, so it did not also show {', '.join(sorted(others))}")
+
+        rec = 0.9 if kind == "exact" else round(max(0.2, 0.35 + 0.55 * coverage), 2)
         interp = Interpretation(
             title=draft["title"], theme=entry["theme"],
-            keywords=list(entry["keywords"]), word=draft["word"],
+            keywords=list(entry["keywords"]) + unused, word=draft["word"],
             mood=Mood(valence=draft["mood"]["valence"], arousal=draft["mood"]["arousal"]),
-            recognizability=0.9, notes=f"warm library match: {key}",
+            recognizability=rec, notes="; ".join(notes),
         )
         return SceneResult(query=query, words=words_of(query), ok=True, tier="library",
+                           match=kind, unused_words=unused, coverage=round(coverage, 2),
                            interpretation=interp, spec_draft=draft)
 
     affect = lexicon_affect(query)
@@ -311,14 +369,18 @@ def local_result(query: str) -> SceneResult:
         "word": EMOTION_WORD.get(emotion, "OK"),
         "mood": {"valence": v, "arousal": ar},
     })
+    # Nothing in the library resembles this, so every content word is unused: the scene is the
+    # query's mood and nothing more, and it should say so rather than imply a depiction.
     interp = Interpretation(
         title=emotion, theme=EMOTION_THEME.get(emotion, "feeling"),
         keywords=keywords_of(query), word=draft["word"],
         mood=Mood(valence=v, arousal=ar),
-        recognizability=0.35 if affect["matched"] else 0.2,
-        notes="lexicon fallback: mood only, no depiction",
+        recognizability=0.3 if affect["matched"] else 0.15,
+        notes=("read the mood of " + ", ".join(repr(w) for w in content) + " but has no way to depict it"
+               if content else "nothing recognisable in this"),
     )
     return SceneResult(query=query, words=words_of(query), ok=True, tier="lexicon",
+                       match="lexicon", unused_words=content, coverage=0.0,
                        interpretation=interp, spec_draft=draft)
 
 

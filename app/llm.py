@@ -173,7 +173,10 @@ def ingest(query: str) -> Tuple[SceneResult, str, int]:
     if not draft["ok"]:
         return done(fallback.blocked_result(query))
 
+    # The model read the whole query, so nothing is unused; its own recognizability score is
+    # the honest signal here, not a coverage count.
     return done(SceneResult(
         query=query, words=fallback.words_of(query), ok=True, tier=settings.model,
+        match="model", unused_words=[], coverage=1.0,
         interpretation=_interpretation(raw.get("interpretation"), draft), spec_draft=draft,
     ))

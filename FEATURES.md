@@ -13,6 +13,7 @@ renders nothing; the pixel side comes later. A day of those scenes becomes one *
 | Feature | State | Where |
 |---|---|---|
 | One query of up to 5 words, 6 words rejected | done | `app/models.py::IngestRequest` |
+| Honest match reporting: `match`, `unused_words`, `coverage` | done | `app/fallback.py::local_result` |
 | Claude tier: one tool-use call, cached system prompt | done, never run against the real API | `app/llm.py` |
 | Local tier: warm library of 12 scenes, then an affect lexicon | done, fully offline | `app/fallback.py` |
 | Spec draft validated and clamped on every path | done | `app/spec.py::validate` |
@@ -27,6 +28,31 @@ renders nothing; the pixel side comes later. A day of those scenes becomes one *
 | Frontend state endpoint (phase, accepting, live view) | done | `GET /api/state` |
 | Bench page: one query box, word counter, the draft, the arc | done | `GET /demo` |
 | Push script into a running GreenDream | written, not wired | `tools/push_to_greendream.py` |
+
+## Nothing you type is silently dropped
+
+The local tier works by matching your words against a small library, which means it will often
+recognise one word and have no idea about the rest. Left alone, that reads as comprehension it
+does not have: "lebron dunk as 76er" unlocks a canned basketball scene off the word `dunk`, and
+the jersey is gone.
+
+So every result carries three fields that keep it honest:
+
+- `match` — `exact`, `alias`, `fuzzy`, `lexicon`, `model`, or `blocked`
+- `unused_words` — the content words it could not depict, listed for the frontend to show
+- `coverage` — the fraction of your content words it actually used
+
+and `recognizability` is discounted by coverage rather than being a flat 0.9 for any library
+hit. An exact match still scores 0.9; one word out of three scores 0.72; a mood-only lexicon
+answer scores 0.15-0.30. The unused words are also appended to `keywords` (so the model and the
+dream composer still see them) and their mood is blended into tempo and motion, so "my exhausted
+heart is racing" comes out slower than "my heart is racing" even though the library has no way
+to draw exhaustion. When a leftover word names a *different* library scene, the notes say which
+scene was passed over, because the building shows one thing at a time.
+
+Digits survive normalisation, so `76er` stays `76er` in the log, the keywords and the model
+prompt. It still cannot be *spelled* on the facade: the displayable word is A-Z, `!`, `?` and
+space, with no digits, so a number has to become a sprite.
 
 ## Why five words and not five phrases
 

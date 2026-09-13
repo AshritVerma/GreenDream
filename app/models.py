@@ -36,12 +36,19 @@ class Interpretation(BaseModel):
 
 
 class SceneResult(BaseModel):
-    """One query, one thing the building would become."""
+    """One query, one thing the building would become.
+
+    `match`, `unused_words` and `coverage` exist so the answer cannot quietly pretend it
+    understood more than it did. A canned scene unlocked by one word out of four says so.
+    """
 
     query: str
     words: List[str] = Field(default_factory=list)
     ok: bool = True
     tier: str = Field(..., description="the model id, 'library', 'lexicon', or 'blocked'")
+    match: str = Field("", description="how it was reached: model | exact | alias | fuzzy | lexicon | blocked")
+    unused_words: List[str] = Field(default_factory=list, description="words it could not depict")
+    coverage: float = Field(1.0, ge=0, le=1, description="fraction of the content words it could use")
     interpretation: Interpretation
     spec_draft: Dict[str, Any]
 

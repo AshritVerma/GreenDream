@@ -60,6 +60,9 @@ DEMO_PAGE = """<!doctype html>
            border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; color: var(--dim); }
   .badge.model { color: var(--accent); border-color: #1e4a35; }
   .badge.blocked { color: var(--bad); border-color: #4a1e28; }
+  .badge.partial { color: var(--warn); border-color: #4a3c17; }
+  .unused { color: var(--warn); font-size: 13px; margin: 10px 0 0; }
+  .unused s { color: var(--dim); }
   .kv { display: grid; grid-template-columns: 92px 1fr; gap: 2px 10px; font-size: 13px; }
   .kv div:nth-child(odd) { color: var(--dim); }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 0; }
@@ -224,14 +227,21 @@ function render(body) {
   const tierClass = r.tier === 'blocked' ? 'blocked'
                   : (r.tier === 'library' || r.tier === 'lexicon') ? '' : 'model';
 
+  const spent = (r.unused_words || []).length
+    ? `<p class="unused">could not use ${r.unused_words.map(w => `<b>${w}</b>`).join(', ')} &mdash;
+       this scene covers ${(r.coverage * 100) | 0}% of what you said</p>`
+    : '';
+
   const left = document.createElement('div');
   left.innerHTML = `
     <h2>${it.title || d.title}</h2>
     <p class="said">&ldquo;${r.query.replace(/</g, '&lt;')}&rdquo; &middot; ${r.words.length} words</p>
     <span class="badge ${tierClass}">${r.tier}</span>
+    ${r.match && r.match !== r.tier ? `<span class="badge ${(r.unused_words || []).length ? 'partial' : ''}">${r.match} match</span>` : ''}
     <span class="badge">${it.theme}</span>
     ${d.word ? `<span class="badge">shows ${d.word}</span>` : '<span class="badge">no text</span>'}
     <div class="chips">${(it.keywords || []).map(k => `<span class="chip">${k}</span>`).join('')}</div>
+    ${spent}
     <div class="kv" style="margin-top:12px">
       <div>world</div><div>${d.world}</div>
       <div>motion</div><div>${d.motion.kind} · speed ${d.motion.speed.toFixed(2)} · amount ${d.motion.amount.toFixed(2)}</div>

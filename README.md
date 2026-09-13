@@ -67,6 +67,9 @@ The response:
     "words": ["a", "rocket", "launch"],
     "ok": true,
     "tier": "claude-haiku-4-5",
+    "match": "model",
+    "unused_words": [],
+    "coverage": 1.0,
     "interpretation": {
       "title": "rocket launch", "theme": "event",
       "keywords": ["rocket", "fire", "ascent"],
@@ -90,6 +93,10 @@ The response:
 `interpretation` is what the words mean; `spec_draft` is how to show it, in the same vocabulary
 GreenDream's renderer already speaks (`scene.SCHEMA`). Keeping both means the pixel side can be
 built from either without another round trip to the model.
+
+`match`, `unused_words` and `coverage` stop the answer from pretending it understood more than it
+did — the local tier will happily unlock a canned scene off one recognised word, and these fields
+are how the frontend can say so out loud. See `FEATURES.md`.
 
 ## Two tiers, one shape
 
