@@ -5,8 +5,10 @@ gate banner, the two switches, the resulting draft field by field, and the day's
 No build step, no dependencies, no framework, so it cannot rot separately from the API it
 exercises.
 
-It shows palette swatches and the sprite silhouette because those are draft *fields* worth
-reading. It is not a facade renderer; nothing here pretends to be the building.
+It shows palette swatches, the beat timeline, and a rough 9x17 animation of the draft, because a
+scene that happens over time cannot be judged from a table of numbers. That animation is a sketch
+for reading drafts, not the facade renderer, and it deliberately makes no attempt to be one: the
+real renderer lives in GreenDream and owns every pixel decision.
 """
 
 from __future__ import annotations
@@ -74,6 +76,17 @@ DEMO_PAGE = """<!doctype html>
   .sw { width: 24px; height: 24px; border-radius: 5px; border: 1px solid rgba(255,255,255,.14); }
   .sprite { display: grid; grid-template-columns: repeat(9, 9px); gap: 1px; }
   .sprite i { width: 9px; height: 9px; border-radius: 1px; background: #131a27; }
+  .facade { display: grid; grid-template-columns: repeat(9, 13px); gap: 2px;
+            background: #04060b; border: 1px solid var(--line); border-radius: 7px; padding: 7px; }
+  .facade i { width: 13px; height: 13px; border-radius: 2px; background: #080c14; }
+  .cap { text-align: center; font-size: 12px; min-height: 34px; }
+  .cap b { color: var(--ink); font-weight: 600; }
+  .timeline { display: flex; gap: 3px; margin-top: 14px; }
+  .timeline div { flex-grow: 1; flex-basis: 0; background: #0a0f19; border: 1px solid var(--line);
+                  border-radius: 6px; padding: 4px 6px; font-size: 12px; color: var(--dim);
+                  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                  transition: background .12s, color .12s, border-color .12s; }
+  .timeline div.on { background: #10203a; border-color: #33507a; color: var(--ink); }
   .bar { width: 130px; height: 5px; background: #131a27; border-radius: 3px; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); }
   .arc { border-left: 3px solid var(--accent); }
@@ -217,6 +230,152 @@ function spriteGrid(sprite, palette) {
   return box;
 }
 
+/* ------------------------------------------------------------------ facade sketch
+   A rough 9x17 read-through of a draft, so a scene can be judged as something that happens
+   rather than as a list of numbers. This is NOT the building's renderer and does not try to
+   be: it is one plausible reading of the same vocabulary, thrown away every time you submit.
+*/
+const FR = 17, FC = 9;
+let anim = null;
+
+const rgb = h => { const n = parseInt(String(h).slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const mix = (a, b, t) => [0, 1, 2].map(i => a[i] + (b[i] - a[i]) * t);
+const css = c => `rgb(${Math.min(255, c[0] | 0)},${Math.min(255, c[1] | 0)},${Math.min(255, c[2] | 0)})`;
+
+function playFacade(d, host) {
+  const box = document.createElement('div');
+  box.className = 'facade';
+  const cells = [];
+  for (let i = 0; i < FR * FC; i++) { const c = document.createElement('i'); cells.push(c); box.appendChild(c); }
+  host.appendChild(box);
+  const cap = document.createElement('div');
+  cap.className = 'meta cap';
+  host.appendChild(cap);
+
+  const base = rgb(d.palette.base), accent = rgb(d.palette.accent), glow = rgb(d.palette.glow);
+  const sprite = d.sprite, spriteCol = sprite ? rgb(sprite.color) : glow;
+  const held = { at: 0, label: 'held', motion: d.motion, particles: d.particles,
+                 flash: d.flash, brightness: 1, word: d.word };
+  const beats = (d.beats && d.beats.length) ? d.beats : [held];
+  const strip = document.getElementById('strip');
+  const segs = strip ? [...strip.children] : [];
+
+  let parts = [], flashUntil = 0, t0 = performance.now(), last = 0;
+
+  function frame(now) {
+    anim = requestAnimationFrame(frame);
+    if (now - last < 45) return;              // ~22 fps is plenty for a sketch
+    last = now;
+
+    const dur = d.duration_s * 1000;
+    const t = ((now - t0) % dur) / dur;
+    let bi = 0;
+    for (let k = 0; k < beats.length; k++) if (beats[k].at <= t) bi = k;
+    const b = beats[bi], nb = beats[bi + 1];
+    const span = ((nb ? nb.at : 1) - b.at) || 1;
+    const into = Math.min(1, Math.max(0, (t - b.at) / span));
+    const bright = nb ? b.brightness + (nb.brightness - b.brightness) * into : b.brightness;
+    const mo = b.motion, pa = b.particles, fl = b.flash;
+
+    segs.forEach((s, i) => s.className = i === bi ? 'on' : '');
+    cap.innerHTML = `<b>${b.label || d.title}</b><br>${b.word ? 'showing ' + b.word : 'no text'}`;
+
+    // background: the palette's dark base, lifted by this beat's brightness
+    let k = 0.3 + 0.7 * bright;
+    const secs = now / 1000, beat = d.tempo_bpm / 60;
+    if (mo.kind === 'pulse' || mo.kind === 'breathe') {
+      k *= 1 - mo.amount * 0.45 * (1 - Math.sin(secs * beat * Math.PI * (mo.kind === 'pulse' ? 2 : 0.6)));
+    }
+    const field = [];
+    for (let i = 0; i < FR * FC; i++) field.push(base.map(v => v * k));
+
+    // shake displaces the whole facade a window or two, per frame
+    const dx = mo.kind === 'shake' ? Math.round((Math.random() * 2 - 1) * (1 + 2 * mo.amount) * mo.speed) : 0;
+
+    // the moving band: what the motion field actually looks like
+    const phase = (secs * (0.15 + mo.speed * 0.85)) % 1;
+    const reach = 1.4 + 3.2 * mo.amount;
+    if (['rise', 'fall', 'sweep', 'spiral'].includes(mo.kind)) {
+      for (let r = 0; r < FR; r++) for (let c = 0; c < FC; c++) {
+        let dist;
+        if (mo.kind === 'rise') dist = Math.abs(r - (1 - phase) * (FR - 1));
+        else if (mo.kind === 'fall') dist = Math.abs(r - phase * (FR - 1));
+        else if (mo.kind === 'sweep') dist = Math.abs(c - phase * (FC - 1));
+        else {
+          const ang = Math.atan2(r - FR / 2, c - FC / 2) / (Math.PI * 2) + 0.5;
+          dist = Math.min(Math.abs(ang - phase), 1 - Math.abs(ang - phase)) * 8;
+        }
+        const lit = Math.max(0, 1 - dist / reach);
+        if (lit > 0) {
+          const i = r * FC + Math.min(FC - 1, Math.max(0, c + dx));
+          field[i] = mix(field[i], accent, lit * 0.85 * k);
+        }
+      }
+    }
+
+    // particles
+    if (pa.kind !== 'none') {
+      if (Math.random() < pa.density) parts.push({ c: Math.random() * FC, r: pa.direction === 'down' ? -1 : FR, life: 1 });
+      const vy = (pa.direction === 'down' ? 1 : -1) * (0.35 + 1.3 * pa.density);
+      const pcol = pa.kind === 'stars' || pa.kind === 'sparks' ? glow : accent;
+      parts = parts.filter(p => { p.r += vy; return p.r > -2 && p.r < FR + 1; }).slice(-90);
+      for (const p of parts) {
+        const r = Math.round(p.r), c = Math.round(p.c) + dx;
+        if (r >= 0 && r < FR && c >= 0 && c < FC) {
+          const i = r * FC + c;
+          field[i] = mix(field[i], pcol, 0.8 * k);
+        }
+      }
+    }
+
+    // sprite, moved by its anim
+    if (sprite) {
+      const h = sprite.rows.length, mid = Math.round((FR - h) / 2);
+      let top = mid;
+      if (sprite.anim === 'rise') top = Math.round((1 - phase) * (FR - h));
+      else if (sprite.anim === 'fall') top = Math.round(phase * (FR - h));
+      else if (sprite.anim === 'bounce') top = mid + Math.round(Math.sin(secs * beat * Math.PI * 2) * Math.min(3, mid));
+      const sk = sprite.anim === 'pulse' ? 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(secs * beat * Math.PI * 2)) : 1;
+      sprite.rows.forEach((row, ri) => {
+        const r = top + ri;
+        if (r < 0 || r >= FR) return;
+        [...row].forEach((ch, ci) => {
+          const c = ci + dx;
+          if (ch === '#' && c >= 0 && c < FC) field[r * FC + c] = spriteCol.map(v => v * k * sk);
+        });
+      });
+    }
+
+    // flash: the one thing that should make you flinch
+    if (fl.kind !== 'none' && Math.random() < fl.rate * 0.14) flashUntil = now + (fl.kind === 'lightning' ? 70 : 120);
+    if (now < flashUntil) for (let i = 0; i < field.length; i++) field[i] = mix(field[i], glow, 0.8);
+
+    for (let i = 0; i < field.length; i++) cells[i].style.background = css(field[i]);
+  }
+  if (anim) cancelAnimationFrame(anim);
+  anim = requestAnimationFrame(frame);
+}
+
+function beatStrip(d) {
+  const strip = document.createElement('div');
+  strip.className = 'timeline';
+  strip.id = 'strip';
+  const beats = (d.beats && d.beats.length) ? d.beats : [];
+  if (!beats.length) {
+    strip.innerHTML = `<div>one held picture for ${d.duration_s}s &mdash; no beats</div>`;
+    return strip;
+  }
+  beats.forEach((b, i) => {
+    const seg = document.createElement('div');
+    const end = i + 1 < beats.length ? beats[i + 1].at : 1;
+    seg.style.flexGrow = String(Math.max(0.08, end - b.at));
+    seg.textContent = b.label || `beat ${i + 1}`;
+    seg.title = `${(b.at * d.duration_s).toFixed(1)}s · brightness ${b.brightness}`;
+    strip.appendChild(seg);
+  });
+  return strip;
+}
+
 function render(body) {
   const r = body.result, d = r.spec_draft, it = r.interpretation;
   const out = document.getElementById('out');
@@ -248,6 +407,7 @@ function render(body) {
       <div>particles</div><div>${d.particles.kind}${d.particles.kind === 'none' ? '' : ` · ${d.particles.density.toFixed(2)} ${d.particles.direction}`}</div>
       <div>flash</div><div>${d.flash.kind}${d.flash.kind === 'none' ? '' : ` · ${d.flash.rate.toFixed(2)}`}</div>
       <div>tempo</div><div>${Math.round(d.tempo_bpm)} bpm · ${d.duration_s}s</div>
+      <div>sprite</div><div>${d.sprite ? `${d.sprite.rows.length} rows · ${d.sprite.anim}` : 'none — the whole facade carries it'}</div>
       <div>notes</div><div>${it.notes || '&mdash;'}</div>
     </div>
     <p class="meta" style="margin:12px 0 0">answered by ${body.tier} in ${body.latency_ms} ms ·
@@ -265,8 +425,9 @@ function render(body) {
     sw.appendChild(c);
   }
   side.appendChild(sw);
-  const grid = spriteGrid(d.sprite, d.palette);
-  if (grid) side.appendChild(grid);
+  const stage = document.createElement('div');
+  stage.className = 'side';
+  side.appendChild(stage);
   const bars = document.createElement('div');
   bars.innerHTML = `
     <div class="meta">recognizable ${(it.recognizability * 100) | 0}%</div>
@@ -278,6 +439,8 @@ function render(body) {
   panel.appendChild(left);
   panel.appendChild(side);
   out.appendChild(panel);
+  left.appendChild(beatStrip(d));   // in the DOM before the player looks for it
+  playFacade(d, stage);
 
   document.getElementById('rawpanel').className = 'panel';
   document.getElementById('raw').textContent = JSON.stringify(body, null, 2);

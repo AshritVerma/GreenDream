@@ -14,6 +14,7 @@ renders nothing; the pixel side comes later. A day of those scenes becomes one *
 |---|---|---|
 | One query of up to 5 words, 6 words rejected | done | `app/models.py::IngestRequest` |
 | Honest match reporting: `match`, `unused_words`, `coverage` | done | `app/fallback.py::local_result` |
+| `beats`: a scene is an event in time, not a held picture | done | `app/spec.py::_beats`, `app/fallback.py::BEATS` |
 | Claude tier: one tool-use call, cached system prompt | done, never run against the real API | `app/llm.py` |
 | Local tier: warm library of 12 scenes, then an affect lexicon | done, fully offline | `app/fallback.py` |
 | Spec draft validated and clamped on every path | done | `app/spec.py::validate` |
@@ -53,6 +54,37 @@ scene was passed over, because the building shows one thing at a time.
 Digits survive normalisation, so `76er` stays `76er` in the log, the keywords and the model
 prompt. It still cannot be *spelled* on the facade: the displayable word is A-Z, `!`, `?` and
 space, with no digits, so a number has to become a sprite.
+
+## Scenes happen; they do not sit there
+
+Every field in spec-v1 describes a steady state: a motion kind with a speed, a particle density, a
+flash rate, a tempo. Nothing in it can say "and then". A dunk written that way is a picture of a
+basketball with a wobble applied for ten seconds — the leap and the impact, which are the entire
+event, have nowhere to live. The sprite ends up carrying the meaning alone, which on a 9 x 17
+facade means the building is reduced to showing its logo.
+
+So a draft can carry `beats`: two to four phases with a position in the scene, a label, and
+overrides for motion, particles, flash, brightness and `word`. A beat names only what changes and
+inherits the rest. The dunk becomes:
+
+| at | beat | what the building does |
+|---|---|---|
+| 0.0 | the approach | still, dim, no text |
+| 0.3 | the leap | a band rising fast, sparks starting |
+| 0.55 | it lands | hard shake, full flash, `DUNK!` appears |
+| 0.75 | the crowd | shake easing, sparks falling, still bright |
+
+Two properties make this safe to add before the renderer exists:
+
+- **Additive.** `beats` is not in `required` and `schema_version` stays `spec-v1`. The base fields
+  still describe the whole scene, so GreenDream's current renderer plays the held version and
+  never sees the new key. Reading the beats is opt-in work on the pixel side.
+- **Degrading.** Fewer than two usable beats validates to `[]` rather than to one pointless phase,
+  and beats are sorted, clamped into 0-1, and nudged apart so two can never land on one instant.
+
+The demo page plays a rough 9 x 17 animation of a draft so choreography can be judged by eye. It
+is a sketch for reading drafts, not a second renderer, and it is deliberately not shared with
+GreenDream.
 
 ## Why five words and not five phrases
 

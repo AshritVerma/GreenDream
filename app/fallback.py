@@ -138,6 +138,102 @@ LIBRARY: Dict[str, dict] = {
                  "word": None, "mood": {"valence": 0.6, "arousal": 0.7}}},
 }
 
+# --------------------------------------------------------------------------- choreography
+#
+# The base fields above describe a scene that holds for its whole duration, which is how a dunk
+# ends up as a picture of a ball with a wobble. These beats give each scene a shape in time: what
+# builds, what lands, what is left. A beat names only what changes. Additive by design — a
+# renderer that ignores `beats` still plays the held version.
+
+BEATS: Dict[str, List[dict]] = {
+    "thunderstorm": [
+        {"at": 0.0, "label": "the air goes still", "motion": {"kind": "still", "speed": 0.2, "amount": 0.1},
+         "particles": {"density": 0.3}, "flash": {"kind": "none", "rate": 0.0}, "brightness": 0.35},
+        {"at": 0.35, "label": "the sky opens", "particles": {"density": 0.9}, "flash": {"rate": 0.4}, "brightness": 0.7},
+        {"at": 0.6, "label": "the strike", "motion": {"speed": 0.9, "amount": 0.45}, "flash": {"rate": 1.0}, "brightness": 1.0},
+        {"at": 0.75, "label": "rain settles in", "motion": {"kind": "breathe", "speed": 0.3, "amount": 0.2},
+         "particles": {"density": 0.7}, "flash": {"rate": 0.15}, "brightness": 0.55},
+    ],
+    "birthday": [
+        {"at": 0.0, "label": "candles lit", "motion": {"speed": 0.3, "amount": 0.2},
+         "particles": {"kind": "none", "density": 0.0}, "flash": {"rate": 0.0}, "brightness": 0.5, "word": None},
+        {"at": 0.3, "label": "the blow out", "motion": {"speed": 0.9, "amount": 0.5}, "flash": {"rate": 0.7}, "brightness": 1.0},
+        {"at": 0.45, "label": "confetti", "particles": {"density": 1.0}, "flash": {"rate": 0.2}, "brightness": 0.85},
+        {"at": 0.8, "label": "the room settles", "motion": {"speed": 0.5, "amount": 0.3}, "particles": {"density": 0.5}, "brightness": 0.7},
+    ],
+    "my heart is racing": [
+        {"at": 0.0, "label": "a held breath", "motion": {"kind": "still", "speed": 0.2, "amount": 0.1},
+         "particles": {"density": 0.0}, "brightness": 0.4},
+        {"at": 0.25, "label": "it starts", "motion": {"speed": 0.7, "amount": 0.4}, "brightness": 0.7},
+        {"at": 0.5, "label": "flat out", "motion": {"speed": 1.0, "amount": 0.6}, "particles": {"density": 0.4}, "brightness": 1.0},
+        {"at": 0.85, "label": "still going", "motion": {"speed": 0.85, "amount": 0.5}, "brightness": 0.8},
+    ],
+    "rocket launch": [
+        {"at": 0.0, "label": "on the pad", "particles": {"density": 0.15}, "flash": {"rate": 0.0}, "brightness": 0.4, "word": None},
+        {"at": 0.2, "label": "ignition", "motion": {"kind": "shake", "speed": 0.7, "amount": 0.3},
+         "particles": {"density": 1.0}, "flash": {"rate": 0.6}, "brightness": 1.0, "word": None},
+        {"at": 0.45, "label": "the climb", "motion": {"kind": "rise", "speed": 0.9, "amount": 0.9},
+         "particles": {"density": 0.8}, "flash": {"rate": 0.1}, "brightness": 0.9},
+        {"at": 0.8, "label": "gone", "motion": {"kind": "rise", "speed": 0.4, "amount": 0.3},
+         "particles": {"density": 0.2}, "brightness": 0.45, "word": None},
+    ],
+    "calm ocean": [
+        {"at": 0.0, "label": "the swell in", "motion": {"speed": 0.15, "amount": 0.3}, "brightness": 0.55},
+        {"at": 0.5, "label": "and out", "motion": {"speed": 0.25, "amount": 0.5}, "brightness": 0.8},
+    ],
+    "lebron dunk": [
+        {"at": 0.0, "label": "the approach", "motion": {"kind": "still", "speed": 0.3, "amount": 0.1},
+         "particles": {"density": 0.0}, "flash": {"rate": 0.0}, "brightness": 0.45, "word": None},
+        {"at": 0.3, "label": "the leap", "motion": {"kind": "rise", "speed": 1.0, "amount": 0.9},
+         "particles": {"density": 0.3}, "flash": {"rate": 0.05}, "brightness": 0.8, "word": None},
+        {"at": 0.55, "label": "it lands", "motion": {"kind": "shake", "speed": 1.0, "amount": 0.5},
+         "particles": {"density": 1.0}, "flash": {"rate": 1.0}, "brightness": 1.0},
+        {"at": 0.75, "label": "the crowd", "motion": {"kind": "shake", "speed": 0.5, "amount": 0.25},
+         "particles": {"density": 0.5}, "flash": {"rate": 0.2}, "brightness": 0.8},
+    ],
+    "snow day": [
+        {"at": 0.0, "label": "first flakes", "particles": {"density": 0.25}, "brightness": 0.5},
+        {"at": 0.35, "label": "steady fall", "particles": {"density": 0.8}, "brightness": 0.7},
+        {"at": 0.8, "label": "everything muffled", "motion": {"speed": 0.15, "amount": 0.15},
+         "particles": {"density": 0.6}, "brightness": 0.85},
+    ],
+    "i'm so happy": [
+        {"at": 0.0, "label": "it rises", "motion": {"kind": "rise", "speed": 0.4, "amount": 0.3},
+         "particles": {"density": 0.2}, "brightness": 0.5},
+        {"at": 0.35, "label": "grinning", "motion": {"kind": "pulse", "speed": 0.6, "amount": 0.3},
+         "particles": {"density": 0.7}, "brightness": 0.9},
+        {"at": 0.75, "label": "held there", "motion": {"kind": "breathe", "speed": 0.3, "amount": 0.25}, "brightness": 1.0},
+    ],
+    "take me to space": [
+        {"at": 0.0, "label": "drifting", "brightness": 0.35},
+        {"at": 0.3, "label": "the jump", "motion": {"kind": "rise", "speed": 1.0, "amount": 1.0},
+         "flash": {"kind": "burst", "rate": 0.5}, "brightness": 1.0},
+        {"at": 0.6, "label": "streaking", "motion": {"kind": "sweep", "speed": 1.0, "amount": 0.8}, "brightness": 0.8},
+        {"at": 0.9, "label": "out there", "motion": {"kind": "still", "speed": 0.2, "amount": 0.0}, "brightness": 0.45},
+    ],
+    "it's raining": [
+        {"at": 0.0, "label": "it starts", "particles": {"density": 0.35}, "brightness": 0.45},
+        {"at": 0.4, "label": "steady now", "particles": {"density": 0.8}, "brightness": 0.6},
+    ],
+    "sunrise": [
+        {"at": 0.0, "label": "before light", "motion": {"speed": 0.1, "amount": 0.05}, "brightness": 0.15},
+        {"at": 0.3, "label": "the first edge", "motion": {"speed": 0.15, "amount": 0.2}, "brightness": 0.5},
+        {"at": 0.65, "label": "full light", "motion": {"speed": 0.1, "amount": 0.15}, "brightness": 1.0},
+    ],
+    "go up": [
+        {"at": 0.0, "label": "the crouch", "motion": {"kind": "still", "speed": 0.2, "amount": 0.1},
+         "particles": {"density": 0.1}, "brightness": 0.5},
+        {"at": 0.25, "label": "the push", "motion": {"speed": 1.0, "amount": 1.0}, "particles": {"density": 0.6}, "brightness": 1.0},
+        {"at": 0.7, "label": "above it", "motion": {"speed": 0.3, "amount": 0.3}, "particles": {"density": 0.2}, "brightness": 0.7},
+    ],
+}
+
+
+def library_spec(key: str) -> dict:
+    """A library entry's spec with its choreography attached."""
+    return {**LIBRARY[key]["spec"], "beats": BEATS.get(key, [])}
+
+
 ALIASES = {
     "storm": "thunderstorm", "lightning": "thunderstorm", "thunder": "thunderstorm",
     "happy birthday": "birthday", "party": "birthday", "cake": "birthday",
@@ -324,7 +420,7 @@ def local_result(query: str) -> SceneResult:
         unused = [w for w in content if w not in known]
         coverage = 1.0 - len(unused) / max(1, len(content))
 
-        draft = spec_mod.validate(entry["spec"])
+        draft = spec_mod.validate(library_spec(key))
         notes = [f"warm library scene '{key}', matched on {', '.join(repr(w) for w in matched)}"]
         if unused:
             listed = ", ".join(repr(w) for w in unused)
@@ -368,6 +464,16 @@ def local_result(query: str) -> SceneResult:
         "sprite": None,
         "word": EMOTION_WORD.get(emotion, "OK"),
         "mood": {"valence": v, "arousal": ar},
+        # Even a mood-only scene should arrive and subside rather than sit at one level, and the
+        # word waits for the middle so the facade is not just a sign the whole time.
+        "beats": [
+            {"at": 0.0, "label": "it arrives", "motion": {"speed": ar * 0.4, "amount": 0.2},
+             "particles": {"density": 0.15}, "brightness": 0.4, "word": None},
+            {"at": 0.3, "label": emotion, "motion": {"speed": ar, "amount": 0.3 + 0.4 * ar},
+             "particles": {"density": 0.3 + 0.5 * ar}, "brightness": 0.75 + 0.25 * ar},
+            {"at": 0.8, "label": "and stays" if ar < 0.5 else "and holds", "motion": {"speed": ar * 0.7},
+             "particles": {"density": 0.2 + 0.3 * ar}, "brightness": 0.6},
+        ],
     })
     # Nothing in the library resembles this, so every content word is unused: the scene is the
     # query's mood and nothing more, and it should say so rather than imply a depiction.

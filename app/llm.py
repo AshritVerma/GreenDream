@@ -60,6 +60,7 @@ Rules that come from the building itself:
 - A sprite is optional: up to 12 rows of exactly 9 characters, '#' lit and '.' dark, a bold silhouette (heart, arrow, rocket, cup, tree, star, face). Skip it when the thing has no simple silhouette; a speck or a solid slab reads as noise and will be thrown away.
 - 'word' is optional and is the only text the building may ever show: 1-7 characters, capitals, '!' and '?' allowed. Never a sentence, never the person's own words verbatim.
 - Match energy: calm things breathe slowly at low tempo; urgent things pulse or shake with bursts and high tempo.
+- Choreograph, do not pose. Almost everything worth showing happens over time, so give 'beats': 2-4 phases with what builds, what lands, and what is left. A dunk is an approach, a leap, an impact and a crowd - not a ball held still for ten seconds. Start dim and quiet and earn the bright moment; hold 'word' back (null) until the beat that deserves it. A beat names only the fields that change.
 - Set ok=false for hate, harassment, sexual content, or anything targeting a real private person. Public celebration of athletes, artists, holidays and teams is fine.
 - Be honest in recognizability: 0.9 means a stranger names it unprompted, 0.3 means it is only a mood.
 
@@ -70,11 +71,14 @@ Answer only by calling the tool."""
 
 
 def _reference_block() -> str:
-    """Two library specs as compact JSON, inside the cached system block."""
+    """Two library specs as compact JSON, inside the cached system block.
+
+    Both are chosen because they are events with beats, so the model copies the choreography and
+    not just the palette.
+    """
     lines = []
     for key in ("thunderstorm", "rocket launch"):
-        entry = fallback.LIBRARY[key]
-        lines.append(f"{key} -> {json.dumps(entry['spec'], separators=(',', ':'))}")
+        lines.append(f"{key} -> {json.dumps(fallback.library_spec(key), separators=(',', ':'))}")
     return "\n".join(lines)
 
 

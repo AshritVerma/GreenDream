@@ -7,6 +7,11 @@ guarantees the draft is safe and complete, so a half-broken model answer is stil
 Two rules that outlive the schema:
   - no raw user text ever becomes a displayable field; `word` is 1-7 chars of A-Z ! ? only
   - every draft carries `schema_version`, so the renderer can reject drift
+
+`beats` is an additive extension, deliberately not in `required` and not a version bump: the
+base fields still describe the whole scene on their own, so GreenDream's current renderer keeps
+working and simply plays a held picture. A renderer that does read `beats` gets the same scene as
+an event in time — what builds, what lands, what is left.
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ from typing import Any, Dict
 
 SCHEMA_VERSION = "spec-v1"
 COLS = 9  # the tower is 9 windows wide; sprite rows are exactly this long
+ROWS = 17  # and 17 tall, 153 windows in all
+MAX_BEATS = 4
 
 WORLDS = ["ocean", "forest", "aurora", "hyperspace", "sunrise", "storm", "snow", "lava", "city"]
 WORLD_NAMES = WORLDS + ["none"]
@@ -42,6 +49,17 @@ SPEC_SCHEMA: Dict[str, Any] = {
             "anim": {"type": "string", "enum": SPRITE_ANIMS}, "color": {"type": "string"}}},
         "word": {"type": ["string", "null"], "description": "optional reply shown as a vertical marquee; 1-7 chars, A-Z ! ? only"},
         "mood": {"type": "object", "properties": {"valence": {"type": "number"}, "arousal": {"type": "number"}}},
+        "beats": {"type": "array", "maxItems": MAX_BEATS, "description":
+                  "2-4 phases in time, so the scene is an event rather than a held picture: what "
+                  "builds, what lands, what is left. Omit only for scenes that genuinely just sit "
+                  "there. A beat overrides the fields it names and inherits the rest.",
+                  "items": {"type": "object", "properties": {
+                      "at": {"type": "number", "minimum": 0, "maximum": 1, "description": "start, as a fraction of duration_s"},
+                      "label": {"type": "string", "description": "2-3 words: 'the leap', 'impact', 'settling'"},
+                      "motion": {"type": "object"}, "particles": {"type": "object"}, "flash": {"type": "object"},
+                      "brightness": {"type": "number", "minimum": 0, "maximum": 1},
+                      "word": {"type": ["string", "null"], "description": "null to stay silent until the beat that earns the word"},
+                  }}},
     },
     "required": ["ok", "title", "world", "motion", "particles", "flash", "sprite", "word"],
 }
@@ -69,6 +87,58 @@ def clean_word(v: Any) -> Any:
     return w or None
 
 
+def _motion(raw: Any, base: Dict[str, Any]) -> Dict[str, Any]:
+    d = raw if isinstance(raw, dict) else {}
+    return {"kind": d.get("kind") if d.get("kind") in MOTIONS else base["kind"],
+            "speed": _num(d.get("speed"), 0, 1, base["speed"]),
+            "amount": _num(d.get("amount"), 0, 1, base["amount"])}
+
+
+def _particles(raw: Any, base: Dict[str, Any]) -> Dict[str, Any]:
+    d = raw if isinstance(raw, dict) else {}
+    return {"kind": d.get("kind") if d.get("kind") in PARTICLES else base["kind"],
+            "density": _num(d.get("density"), 0, 1, base["density"]),
+            "direction": d.get("direction") if d.get("direction") in ("down", "up") else base["direction"]}
+
+
+def _flash(raw: Any, base: Dict[str, Any]) -> Dict[str, Any]:
+    d = raw if isinstance(raw, dict) else {}
+    return {"kind": d.get("kind") if d.get("kind") in FLASHES else base["kind"],
+            "rate": _num(d.get("rate"), 0, 1, base["rate"])}
+
+
+def _beats(raw: Any, base: Dict[str, Any]) -> list:
+    """Put the scene in time. Additive: a renderer that ignores this plays the base fields.
+
+    A beat names only what changes and inherits the rest from the scene, so the model can say
+    "then it goes white and shakes" without restating the palette. Fewer than two usable beats
+    is not a timeline, so it degrades to nothing rather than to a single pointless phase.
+    """
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for b in raw[:MAX_BEATS]:
+        if not isinstance(b, dict):
+            continue
+        beat = {
+            "at": _num(b.get("at"), 0, 1, 0.0),
+            "label": re.sub(r"\s+", " ", str(b.get("label", "") or ""))[:24].strip(),
+            "motion": _motion(b.get("motion"), base["motion"]),
+            "particles": _particles(b.get("particles"), base["particles"]),
+            "flash": _flash(b.get("flash"), base["flash"]),
+            "brightness": _num(b.get("brightness"), 0, 1, 1.0),
+            "word": clean_word(b.get("word")) if "word" in b else base["word"],
+        }
+        out.append(beat)
+    if len(out) < 2:
+        return []
+    out.sort(key=lambda b: b["at"])
+    out[0]["at"] = 0.0
+    for i in range(1, len(out)):  # strictly increasing, or two beats land on the same instant
+        out[i]["at"] = round(min(1.0, max(out[i]["at"], out[i - 1]["at"] + 0.05)), 3)
+    return out
+
+
 def validate(raw: Any) -> Dict[str, Any]:
     """Coerce anything into a safe, complete spec draft. Never raises."""
     d = raw if isinstance(raw, dict) else {}
@@ -86,17 +156,15 @@ def validate(raw: Any) -> Dict[str, Any]:
         "duration_s": _num(d.get("duration_s"), 6, 20, 12),
         "world": d.get("world") if d.get("world") in WORLD_NAMES else "none",
         "palette": {"base": hex_or(pal.get("base"), "#101a2e"), "accent": hex_or(pal.get("accent"), "#7cc4ff"), "glow": hex_or(pal.get("glow"), "#ffffff")},
-        "motion": {"kind": mo.get("kind") if mo.get("kind") in MOTIONS else "breathe",
-                   "speed": _num(mo.get("speed"), 0, 1, 0.5), "amount": _num(mo.get("amount"), 0, 1, 0.5)},
-        "particles": {"kind": pa.get("kind") if pa.get("kind") in PARTICLES else "none",
-                      "density": _num(pa.get("density"), 0, 1, 0.5),
-                      "direction": pa.get("direction") if pa.get("direction") in ("down", "up") else "down"},
+        "motion": _motion(mo, {"kind": "breathe", "speed": 0.5, "amount": 0.5}),
+        "particles": _particles(pa, {"kind": "none", "density": 0.5, "direction": "down"}),
         "tempo_bpm": _num(d.get("tempo_bpm"), 30, 200, 70),
-        "flash": {"kind": fl.get("kind") if fl.get("kind") in FLASHES else "none", "rate": _num(fl.get("rate"), 0, 1, 0.3)},
+        "flash": _flash(fl, {"kind": "none", "rate": 0.3}),
         "sprite": None,
         "word": clean_word(d.get("word")),
         "mood": {"valence": _num(md.get("valence"), -1, 1, 0.2), "arousal": _num(md.get("arousal"), 0, 1, 0.5)},
     }
+    spec["beats"] = _beats(d.get("beats"), spec)
     if sp and isinstance(sp.get("rows"), list):
         rows = [re.sub(r"[^#.]", ".", str(r))[:COLS].ljust(COLS, ".") for r in sp["rows"][:12] if isinstance(r, str)]
         lit = sum(r.count("#") for r in rows)
@@ -118,5 +186,5 @@ def shrug() -> Dict[str, Any]:
         "motion": {"kind": "shake", "speed": 0.3, "amount": 0.3},
         "particles": {"kind": "none", "density": 0.0, "direction": "down"},
         "tempo_bpm": 50.0, "flash": {"kind": "none", "rate": 0.0}, "sprite": None, "word": "HMM?",
-        "mood": {"valence": 0.0, "arousal": 0.2},
+        "mood": {"valence": 0.0, "arousal": 0.2}, "beats": [],
     }

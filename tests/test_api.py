@@ -177,6 +177,70 @@ def test_the_model_tier_claims_full_coverage(with_stub_llm):
     assert result.match == "model" and result.unused_words == [] and result.coverage == 1.0
 
 
+# --------------------------------------------------------------------------- beats
+
+def test_a_scene_is_an_event_in_time():
+    beats = fallback.local_result("lebron dunk").spec_draft["beats"]
+    labels = [b["label"] for b in beats]
+
+    assert labels == ["the approach", "the leap", "it lands", "the crowd"]
+    assert [b["at"] for b in beats] == sorted(b["at"] for b in beats)
+    assert beats[0]["brightness"] < beats[2]["brightness"] == 1.0, "the impact is the bright moment"
+    assert beats[0]["word"] is None and beats[2]["word"] == "DUNK!", "the word waits for the landing"
+
+
+def test_beats_are_additive_so_the_current_renderer_still_works():
+    draft = fallback.local_result("lebron dunk").spec_draft
+    assert draft["schema_version"] == spec.SCHEMA_VERSION, "not a version bump"
+    for key in spec.SPEC_SCHEMA["required"]:
+        assert key in draft, "the held version is still fully described"
+    assert "beats" not in spec.SPEC_SCHEMA["required"]
+    assert fallback.local_result("finals week").spec_draft["beats"], "even a mood arrives and subsides"
+
+
+def test_a_beat_inherits_what_it_does_not_name():
+    draft = spec.validate({
+        "motion": {"kind": "sweep", "speed": 0.4, "amount": 0.9},
+        "particles": {"kind": "snow", "density": 0.6, "direction": "down"},
+        "word": "HELLO",
+        "beats": [{"at": 0, "brightness": 0.2}, {"at": 0.5, "motion": {"speed": 1.0}}],
+    })
+    first, second = draft["beats"]
+    assert first["motion"] == draft["motion"], "named nothing, so it is the scene"
+    assert second["motion"] == {"kind": "sweep", "speed": 1.0, "amount": 0.9}, "only speed changed"
+    assert second["particles"]["kind"] == "snow"
+    assert first["word"] == "HELLO", "absent word inherits"
+    assert spec.validate({"word": "HI", "beats": [{"at": 0, "word": None}, {"at": 0.5}]})["beats"][0]["word"] is None, \
+        "an explicit null is a deliberate silence"
+
+
+@pytest.mark.parametrize("raw, why", [
+    ("nonsense", "not a list"),
+    ([], "empty"),
+    ([{"at": 0}], "one phase is not a timeline"),
+    (["x", 3], "no usable entries"),
+])
+def test_unusable_beats_degrade_to_a_held_scene(raw, why):
+    assert spec.validate({"beats": raw})["beats"] == [], why
+
+
+def test_beats_are_ordered_clamped_and_never_collide():
+    beats = spec.validate({"beats": [{"at": 9}, {"at": 0.4}, {"at": 0.4}, {"at": -2}]})["beats"]
+    ats = [b["at"] for b in beats]
+    assert ats[0] == 0.0, "the first beat opens the scene"
+    assert ats == sorted(ats) and len(set(ats)) == len(ats), "two beats cannot land on one instant"
+    assert all(0.0 <= a <= 1.0 for a in ats)
+
+
+def test_at_most_four_beats():
+    beats = spec.validate({"beats": [{"at": i / 10} for i in range(9)]})["beats"]
+    assert len(beats) == spec.MAX_BEATS == 4
+
+
+def test_the_shrug_holds_still():
+    assert spec.shrug()["beats"] == [], "we are not choreographing a refusal"
+
+
 def test_blocked_query_never_becomes_a_scene(client):
     body = client.post("/api/ingest", json={"query": "kill everyone"}).json()
     result = body["result"]
